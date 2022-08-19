@@ -9,9 +9,17 @@ module.exports = {
     "google",
   ],
   rules: {
-    quotes: ["error", "double"],
+    "quotes": ["error", "double"],
+    "max-len": "off",
+    "valid-jsdoc": "warn",
+    "prefer-destructuring": ["error", {
+      "array": true,
+      "object": true,
+    }, {
+      "enforceForRenamedProperties": false,
+    }],
   },
   parserOptions: {
-    ecmaVersion: 8,
+    ecmaVersion: 2020,
   },
 };
