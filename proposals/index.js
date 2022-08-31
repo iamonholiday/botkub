@@ -12,143 +12,98 @@ const initApp = () => {
   }
 };
 
-/**
- * Get pulse by timeframe. *
- * @param {string} symbol -> Symbol of the symbol.
- * @param {string} timeFrame -> Pulse name.
- */
-const fetchListOfPulseRFQ = async (symbol, timeFrame) => {
-  const getDB = () => {
-    initApp();
-    return admin.firestore();
-  };
-
-  // 1. Load list of pulses from DB where pulse is not expired.
-  const pulseRef = getDB().collection("pulses")
-      .where("ticker", "==", symbol)
-      .where("interval", "==", timeFrame)
-      .where("expirationTime", ">", Date.now());
-  const pulseSnapshot = await pulseRef.get();
-  const pulses = pulseSnapshot.docs.map((doc) => doc.data()) || [];
-
-  // 2. Convert pulse data to PulseRFQ.
-  const mapped = pulses.map((iPulse) => {
-    const iMap = createPulseRFQ(iPulse);
-    return iMap;
-  });
-
-  // 3. Return pulseRFQ.
-  return mapped;
-};
-
-exports.fetchListOfPulseRFQ = fetchListOfPulseRFQ;
-
-// const PULSE_LEVERAGE = "LX";
-
-const createSignalRFQ = (signal) => {
-  // Make sure "signal.time" and "signal.expiry" are Date object.
-  const time = typeof signal.time !== "object" ? new Date(signal.time) : signal.time;
-  const expiry = typeof signal.expiry !== "object" ? new Date(signal.expiry) : signal.expiry;
-
-  const {
-    signalName,
-    side,
-    ticker: symbol,
-    interval: timeFrame,
-    mark,
-    pp,
-    l1,
-    l2,
-    l3,
-    l4,
-    l5,
-    fastLine,
-    exchange,
-  } = signal;
-
-
-  const winRate = signalName == "MayMae-ATR" ? .7 : .7;
-
-  const riskExposurePercentage = .02;
-  const requestType = "signal";
-
-  return {
-    signalName,
-    side,
-    symbol,
-    time,
-    timeFrame,
-    mark,
-    fastLine,
-    winRate,
-    requestType,
-    riskExposurePercentage,
-    expiry,
-    exchange,
-    data: {
-      pp,
-      l1,
-      l2,
-      l3,
-      l4,
-      l5,
-    },
-  };
-};
-exports.createSignalRFQ = createSignalRFQ;
-
-const createPulseRFQ = (signal) => {
-  // Make sure "signal.time" and "signal.expiry" are Date object.
-  const time = typeof signal.time !== "object" ? new Date(signal.time) : signal.time;
-  const expiry = typeof signal.expiry !== "object" ? new Date(signal.expiry) : signal.expiry;
-  const {
-    pulse,
-    ticker: symbol,
-    interval: timeFrame,
-    mark,
-    exchange,
-  } = signal;
-
-  const winRate = .7;
-  const stakeRisk = .02;
-  const requestType = "pulse";
-
-  const {
-
-    lx, // LX
-    buyTP, buySL, sellTP, sellSL, // ATR
-    cci200, // CCI200
-    fastEMA, slowEMA, // EMA
-  } = signal;
-
-  const data =
-      pulse === "LX" ? {lx} :
-      pulse === "ATR" ? {buyTP, buySL, sellTP, sellSL} :
-      pulse === "CCI200" ? {cci200} :
-      pulse === "EMA" ? {fastEMA, slowEMA} :
-      {};
-
-
-  return {
-    pulse,
-    symbol,
-    time,
-    timeFrame,
-    mark,
-
-    winRate,
-    requestType,
-    stakeRisk,
-    expiry,
-    exchange,
-    data,
-  };
-};
-exports.createPulseRFQ = createPulseRFQ;
-
 const STAKE_PERCENTAGE = .1;
 
 exports.ProposalManager = class {
+  static createSignalRFQ(data) {
+    // Make sure "signal.time" and "signal.expiry" are Date object.
+    const time = typeof data.time !== "object" ? new Date(data.time) : data.time;
+    const expiry = typeof data.expiry !== "object" ? new Date(data.expiry) : data.expiry;
+
+    const {
+      signal,
+      side,
+      symbol,
+      interval,
+      entry,
+      stopLoss,
+      fastLine,
+      exchange,
+    } = data;
+
+
+    const winRate = .7;
+
+    const riskExposurePercentage = .02;
+    const requestType = "signal";
+
+    return {
+      signal,
+      side,
+      symbol,
+      time,
+      interval,
+      entry,
+      fastLine,
+      winRate,
+      requestType,
+      riskExposurePercentage,
+      expiry,
+      exchange,
+      stopLoss,
+    };
+  }
+
+  static createPulseRFQ(rawData) {
+    // Make sure "signal.time" and "signal.expiry" are Date object.
+    const time = typeof rawData.time !== "object" ? new Date(rawData.time) : rawData.time;
+    const expiry = typeof rawData.expiry !== "object" ? new Date(rawData.expiry) : rawData.expiry;
+    const {
+      pulse,
+      symbol,
+      interval,
+      mark,
+      exchange,
+    } = rawData;
+
+    const winRate = .7;
+    const riskExposurePercentage = .02;
+    const requestType = "pulse";
+
+    const {
+
+      lx, // LX
+      buyTP, buySL, sellTP, sellSL, // ATR
+      cci200, // CCI200
+      fastEMA, slowEMA, // EMA
+      buyStopLoss, sellStopLoss, // StopLoss
+    } = rawData;
+
+    const data =
+        pulse === "LX" ? {lx} :
+            pulse === "ATR" ? {buyTP, buySL, sellTP, sellSL} :
+                pulse === "CCI200" ? {cci200} :
+                    pulse === "EMA" ? {fastEMA, slowEMA} :
+                        pulse === "STOP LOSS" ? {buyStopLoss, sellStopLoss} :
+                        {};
+
+
+    return {
+      pulse,
+      symbol,
+      time,
+      interval,
+      mark,
+
+      winRate,
+      requestType,
+      riskExposurePercentage,
+      expiry,
+      exchange,
+      data,
+    };
+  }
+
   getDB() {
     initApp();
     const firestore = admin.firestore();

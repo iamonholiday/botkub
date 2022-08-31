@@ -1,3 +1,4 @@
+const {ProposalManager} = require("./proposals");
 
 const {SignalHelper} = require("./helpers/signal-helper");
 
@@ -20,7 +21,7 @@ const doPost = async (functionName, body) => {
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({body}),
+    body: JSON.stringify(body),
   });
   return res.json();
 };
@@ -29,88 +30,79 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
   const text = req.body;
   const dataType = SignalHelper.isSignalOrPulse(text);
 
+  let ret = {};
+
   if (dataType === "signal") {
-    await SignalHelper.signalHandler(req.body);
-    res.json({message: "Signal has been updated successfully."});
+    const {
+      exchange,
+      symbol,
+      interval,
+      signal,
+      side,
+    } = await SignalHelper.signalHandler(req.body);
+    ret = {message: "Signal has been updated successfully."};
+
+    const recSignal = await SignalHelper.readSignal(exchange, symbol, interval, signal, side);
+    const recPulses = await SignalHelper.readPulse(exchange, symbol, interval);
+
+    const toProposal = {
+      signal: recSignal,
+      pulses: recPulses,
+    };
+
+    // Spawn proposals.
+    doPost("exeProposal", toProposal)
+        .then((result) => {
+          functions.logger.info("result", "result", result);
+        });
   } else if (dataType === "pulse") {
-    await SignalHelper.pulseHandler(req.body);
-    res.json({message: "Pulse has been successfully."});
+    const {
+      exchange,
+      symbol,
+      interval,
+      pulse,
+    } = await await SignalHelper.pulseHandler(req.body);
+    ret ={message: "Pulse has been successfully."};
+
+    const returnedRecs = await SignalHelper.readPulse(exchange, symbol, interval, pulse);
+
+    const toProposal = {
+      signal: null,
+      pulses: returnedRecs,
+    };
+
+    // Spawn proposals.
+    doPost("exeProposal", toProposal)
+        .then((result) => {
+          functions.logger.info("result", "result", result);
+        });
   } else {
     // Log respond data.
     functions.logger.info("error", "dataType is not found", dataType);
-    res.json({
+    ret = {
       "error": "dataType is not found",
       "data": dataType,
-    });
+    };
   }
+  res.json(ret);
 });
 
-exports.readSignal = functions.https.onRequest(async (req, res) => {
-  // Make sure query ticker is not undefined or empty.
-  const {ticker} = req.query;
-  if (!ticker) {
-    functions.logger.info("error", "ticker is not found", ticker);
-    return res.json({"error": "ticker is not found"});
-  }
 
-  const returnedRecs = await SignalHelper.readSignal(req.query.ticker);
-
-  // Try create a proposal.
-  doPost("createProposal", returnedRecs).then((result) => {
-    // Log result.
-    functions.logger.info("result", "result", result);
-  }).catch((error) => {
-    // Log error.
-    functions.logger.info("error", "error", error);
-  });
-
-
-  res.json({
-    data: returnedRecs,
-  });
-});
-
-exports.readPulse = functions.https.onRequest(async (req, res) => {
-  // Make sure query ticker is not undefined or empty.
-  const {ticker} = req.query;
-  if (!ticker) {
-    functions.logger.info("error", "ticker is not found", ticker);
-    return res.json({"error": "ticker is not found"});
-  }
-
-  const returnedRecs = await SignalHelper.readPulse(req.query.ticker);
-
-  // Call async function to update DB and not wait for it to finish.
-  SignalHelper.markReadFlag("pulse", returnedRecs)
-      .then(() => {
-        // Log respond data.
-        functions.logger.info(
-            "returnedRecs has been marked as read.",
-            returnedRecs);
-      }).catch((error) => {
-        // Log respond data.
-        // eslint-disable-next-line max-len
-        functions.logger.info("error", "Not be able to update readTime.", error);
-      });
-
-
-  return res.json({
-    msg: "success",
-  });
-});
-
-/*
 exports.exeProposal = functions.https.onRequest(async (req, res) => {
   // Log request data.
   functions.logger.info("req.body", "req.body", req.body);
-  const {data} = req.body;
-  const signalRFQ = createSignalRFQ(data);
-  const pulseRFQ = createPulseRFQ(data);
 
-  const proposal = new ProposalManager(signalRFQ, pulseRFQ);
-  await proposal.execute();
+
+  const {signal, pulses} = req.body;
+  const signalRFQ = signal ? ProposalManager.createSignalRFQ(signal) : null;
+  const pulseRFQ = pulses.map((iPulse) => ProposalManager.createPulseRFQ(iPulse));
+
+
+  // const proposal = new ProposalManager(signalRFQ, pulseRFQ);
+  // await proposal.execute();
+  console.log( signal, pulses, signalRFQ, pulseRFQ);
 });
-
+/*
 exports.healthCheck = functions.https.onRequest(async (req, res) => {
   const order = new OrderManager("binance");
 

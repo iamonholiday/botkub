@@ -1,11 +1,15 @@
 require("firebase-admin");
-// const _ = require("lodash");
+const _ = require("lodash");
 
 // Init firebase app.
 const admin = require("firebase-admin");
 const functions = require("firebase-functions");
 const os = require("os");
+const {CommonHelper} = require("./common-helper");
 const hostname = os.hostname();
+
+const DEBUG_IGNORE_FULL_FILTER = true;
+
 
 const SEPERATOR = "##########";
 
@@ -29,6 +33,14 @@ const SIGNAL_COLLECTION = "signals";
 const toNumber = (value) => {
   return Number(parseFloat(value).toFixed(FIXED_LENGTH));
 };
+const toDate = (value) => {
+  if (value.toDate) {
+    return value.toDate();
+  } else if (isNaN(Number(value))) {
+    return new Date(value);
+  }
+  return new Date(Number(value));
+};
 
 exports.SignalHelper = class SignalHelper {
   static formatSignalMayMae(data) {
@@ -43,9 +55,9 @@ exports.SignalHelper = class SignalHelper {
       const symbol = ticker;
       const obsoletedFlag = "n";
       const usedTime = null;
-      time = new Date(time);
-      entry = toNumber(entry); // parseFloat(entry).toFixed(FIXED_LENGTH);
-      expiry = new Date(Number(expiry));
+      time = toDate(time);
+      entry = toNumber(entry);
+      expiry = toDate(expiry);
 
 
       // pulse fields.
@@ -73,10 +85,9 @@ exports.SignalHelper = class SignalHelper {
       const symbol = ticker;
       const obsoletedFlag = "n";
       const usedTime = null;
-      time = new Date(time);
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
-      expiry = new Date(Number(expiry));
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
+      time = toDate(time);
+      mark = toNumber(mark);
+      expiry = toDate(expiry);
 
 
       // pulse fields.
@@ -104,10 +115,9 @@ exports.SignalHelper = class SignalHelper {
       const symbol = ticker;
       const obsoletedFlag = "n";
       const usedTime = null;
-      time = new Date(time);
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
-      expiry = new Date(expiry);
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
+      time = toDate(time);
+      mark = toNumber(mark);
+      expiry = toDate(expiry);
 
       // pulse fields.
       lx = toNumber(lx); // parseFloat(lx).toFixed(FIXED_LENGTH);
@@ -133,10 +143,9 @@ exports.SignalHelper = class SignalHelper {
       const symbol = ticker;
       const obsoletedFlag = "n";
       const usedTime = null;
-      time = new Date(time);
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
-      expiry = new Date(expiry);
-      mark = toNumber(mark); // parseFloat(mark).toFixed(FIXED_LENGTH);
+      time = toDate(time);
+      mark = toNumber(mark);
+      expiry = toDate(expiry);
 
       // pulse fields.
       cci200 = toNumber(cci200); // parseFloat(cci200).toFixed(FIXED_LENGTH);
@@ -164,47 +173,92 @@ exports.SignalHelper = class SignalHelper {
     return "";
   }
 
-  static async readPulse(ticker) {
+  static async readPulse(exchange, symbol, interval, pulse = null) {
     const db = getDB();
     const collection = db.collection(PULSE_COLLECTION);
     // Query collection where ticker is equal to ticker and readTime is not exits.
-    const query = collection
-        .where("ticker", "==", ticker)
-        .where("readTime", "!=", null)
-        .orderBy("time", "desc");
+    let query = collection
+        .where("exchange", "==", exchange)
+        .where("symbol", "==", symbol)
+        .where("interval", "==", interval)
+    ;
+
+    if (DEBUG_IGNORE_FULL_FILTER === false) {
+      query = collection
+          .where("usedTime", "==", null)
+          .where("obsoletedFlag", "==", "n")
+          .where("expiry", ">", new Date());
+    }
+
+    // If pulse was sent.
+    if (pulse) {
+      query = query.where("pulse", "==", pulse);
+    }
 
     const snapshot = await query.get();
-    const json = snapshot.docs.map((doc) => {
-      const docData = doc.data();
-
-      // Store doc ID in docData.
-      docData.id = doc.id;
-      return docData;
-    }).reverse();
+    const json = snapshot.docs
+        .sort((a, b) => a.data().time - b.data().time)
+        .map((doc) => {
+          const docData = doc.data();
+          const iMapped = CommonHelper.parseFirebaseDateToDateByKey(docData, "expiry", "time", "usedTime" );
+          return iMapped;
+        });
 
     // Make sure json is not undefined or empty.
     if (!json || json.length === 0) {
       return [];
     }
 
-    return json;
+    let ret = json;
+    if (Array.isArray(json)) {
+      ret = _.uniqBy(json, "pulse");
+    }
+
+    return ret;
   }
 
-  static async readSignal(ticker) {
-    const db = getDB();
-    const collection = db.collection(SIGNAL_COLLECTION);
-    const query = collection.where("ticker", "==", ticker);
-    const snapshot = await query.get();
-    const json = snapshot.docs.map((doc) => {
-      return doc.data();
-    }).reverse();
+  static async readSignal(exchange, symbol, interval, signal, side) {
+    let json;
 
-    // Make sure json is not undefined or empty.
-    if (!json || json.length === 0) {
-      return [];
+    try {
+      const db = getDB();
+      const collection = db.collection(SIGNAL_COLLECTION);
+      let query = collection
+          .where("exchange", "==", exchange)
+          .where("symbol", "==", symbol)
+          .where("interval", "==", interval)
+          .where("signal", "==", signal)
+          .where("side", "==", side)
+
+      ;
+
+      if (DEBUG_IGNORE_FULL_FILTER === false) {
+        query = query
+            .where("usedTime", "==", null)
+            .where("obsoletedFlag", "==", "n")
+            .where("expiry", ">", new Date());
+      }
+
+      const snapshot = await query.get();
+      json = snapshot.docs
+          .sort((a, b) => a.data().time - b.data().time)
+          .map((doc) => {
+            const docData = doc.data();
+            const iMapped = CommonHelper.parseFirebaseDateToDateByKey(docData, "expiry", "time", "usedTime" );
+            return iMapped;
+          });
+
+      // Make sure json is not undefined or empty.
+      if (!json || json.length === 0) {
+        return [];
+      }
+    } catch (error) {
+      // log error.
+      console.log(error);
     }
 
-    return json;
+    // Return latest signal.
+    return json[0];
   }
 
   static async markReadFlag(dataType, readRecs) {
@@ -269,6 +323,15 @@ exports.SignalHelper = class SignalHelper {
     });
 
     await batch.commit();
+
+
+    return {
+      exchange: _.first(json).exchange,
+      symbol: _.first(json).symbol,
+      interval: _.first(json).interval,
+      signal: _.first(json).signal,
+      side: _.first(json).side,
+    };
   }
 
   static async pulseHandler(data) {
@@ -326,5 +389,33 @@ exports.SignalHelper = class SignalHelper {
     });
 
     await batch.commit();
+
+    return {
+      exchange: _.first(json).exchange,
+      symbol: _.first(json).symbol,
+      interval: _.first(json).interval,
+      pulse: _.first(json).pulse,
+    };
+  }
+
+  static async getSymbolFromBody(data) {
+    // original data
+    // signal|side|ticker|time|interval
+    const body = data.split(SEPERATOR).slice(1);
+    const json = body.map((row) => {
+      // eslint-disable-next-line max-len
+      let [signal, side, ticker, time, interval] = row.split("|");
+
+      // common fields
+      const symbol = ticker;
+      time = new Date(time);
+
+
+      return {
+        signal, side, symbol, time, interval,
+      };
+    });
+
+    return _.first(json);
   }
 };
