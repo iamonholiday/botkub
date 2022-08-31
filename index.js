@@ -1,14 +1,16 @@
-const {OrderManager} = require("./orders/order-helper");
-const {createSignalProposal, validateProposal} = require("./proposals");
+
+const {SignalHelper} = require("./helpers/signal-helper");
+
+// const {OrderManager} = require("./orders/order-helper");
+
 const functions = require("firebase-functions");
-const signalHelper = require("./helpers/signal-helper");
 
 
 const {config} = require("firebase-functions");
 
 const doPost = async (functionName, body) => {
   const fetch = (...args) => import("node-fetch").then(({default: fetch}) => fetch(...args));
-  // http://localhost:5001/botkub-27c4e/us-central1/exeProposal
+
   const url = 1 === Number("1") ?
         `http://localhost:5001/botkub-27c4e/us-central1/${functionName}` :
         `https://us-central1-${config().firebase.projectId}.cloudfunctions.net/${functionName}`;
@@ -23,17 +25,16 @@ const doPost = async (functionName, body) => {
   return res.json();
 };
 
-
 exports.updateByData = functions.https.onRequest(async (req, res) => {
   const text = req.body;
-  const dataType = signalHelper.isSignalOrPulse(text);
+  const dataType = SignalHelper.isSignalOrPulse(text);
 
   if (dataType === "signal") {
-    await signalHelper.signalHandler(req.body);
+    await SignalHelper.signalHandler(req.body);
     res.json({message: "Signal has been updated successfully."});
   } else if (dataType === "pulse") {
-    await signalHelper.pulseHandler(req.body);
-    res.json({message: "pulseHandler is called"});
+    await SignalHelper.pulseHandler(req.body);
+    res.json({message: "Pulse has been successfully."});
   } else {
     // Log respond data.
     functions.logger.info("error", "dataType is not found", dataType);
@@ -52,7 +53,7 @@ exports.readSignal = functions.https.onRequest(async (req, res) => {
     return res.json({"error": "ticker is not found"});
   }
 
-  const returnedRecs = await signalHelper.readSignal(req.query.ticker);
+  const returnedRecs = await SignalHelper.readSignal(req.query.ticker);
 
   // Try create a proposal.
   doPost("createProposal", returnedRecs).then((result) => {
@@ -77,10 +78,10 @@ exports.readPulse = functions.https.onRequest(async (req, res) => {
     return res.json({"error": "ticker is not found"});
   }
 
-  const returnedRecs = await signalHelper.readPulse(req.query.ticker);
+  const returnedRecs = await SignalHelper.readPulse(req.query.ticker);
 
   // Call async function to update DB and not wait for it to finish.
-  signalHelper.markReadFlag("pulse", returnedRecs)
+  SignalHelper.markReadFlag("pulse", returnedRecs)
       .then(() => {
         // Log respond data.
         functions.logger.info(
@@ -98,29 +99,16 @@ exports.readPulse = functions.https.onRequest(async (req, res) => {
   });
 });
 
+/*
 exports.exeProposal = functions.https.onRequest(async (req, res) => {
   // Log request data.
   functions.logger.info("req.body", "req.body", req.body);
   const {data} = req.body;
-  const proposal = createSignalProposal(data);
+  const signalRFQ = createSignalRFQ(data);
+  const pulseRFQ = createPulseRFQ(data);
 
-  // Log proposal.
-  functions.logger.info("proposal", "proposal", proposal);
-
-  const {result: validateResult, error: errorProposal} = validateProposal(proposal);
-  if (!validateResult) {
-    functions.logger.info("error", "issues", errorProposal);
-    return res.json({
-      "error": "Proposal not approved.",
-      "data": errorProposal,
-    });
-  }
-  //
-  // const order = new OrderManager();
-  // const {result: orderResult, error: orderError, data: orderData} = await order.openOrder(proposal);
-  //
-  // // Log orderResult.
-  // functions.logger.info("orderResult", "orderResult", orderResult);
+  const proposal = new ProposalManager(signalRFQ, pulseRFQ);
+  await proposal.execute();
 });
 
 exports.healthCheck = functions.https.onRequest(async (req, res) => {
@@ -150,3 +138,16 @@ exports.healthCheck = functions.https.onRequest(async (req, res) => {
   const tradeHistory = await order.getTradeHistory("ETHUSDT");
   functions.logger.info("tradeHistory", "tradeHistory", tradeHistory);
 });
+
+exports.healthCheckOrder = functions.https.onRequest(async (req, res) => {
+  const order = new OrderManager("binance");
+
+  const {result: buyLimitResult} = await order.buyLimit({
+    symbol: "ETHUSDT",
+    qty: .1,
+    price: 1592.82,
+  });
+
+  return res.json(buyLimitResult);
+});
+*/
