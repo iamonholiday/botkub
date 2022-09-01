@@ -1,6 +1,7 @@
 const {OrderManager} = require("../orders/order-helper");
 const admin = require("firebase-admin");
 const serviceAccount = require("../serviceAccount.json");
+const {CommonHelper} = require("../helpers/common-helper");
 
 const initApp = () => {
   // Check if the app is initialized.
@@ -131,7 +132,7 @@ exports.ProposalManager = class {
 
     const asset = "USDT";
     const {symbol, riskExposurePercentage,
-      side, mark, winRate, expiry, exchange,
+      side, mark, winRate, expiry, exchange, stopLoss,
     } = this.signalRfq;
 
     // Raise error if expiry is less than current time.
@@ -140,12 +141,11 @@ exports.ProposalManager = class {
     }
 
 
-    const {tp, sl} = this.getTpAndSlByAtr();
     const balances = await this.orderManager.getBalances(asset);
     const {balance} = balances.find((iBalance) => iBalance.asset === "USDT");
     const riskExposureValue = balance * riskExposurePercentage;
     const stake = balance * STAKE_PERCENTAGE;
-    const positionSize = riskExposureValue / Math.abs(mark - sl); // (stake / mark).toFixed(3);
+    const positionSize = riskExposureValue / Math.abs(mark - stopLoss); // (stake / mark).toFixed(3);
 
 
     // Calculate the leverage.
@@ -159,78 +159,47 @@ exports.ProposalManager = class {
     const {bidPrice, askPrice} = await this.orderManager.getQuote(symbol);
     const price = side === "buy" ? bidPrice : askPrice;
 
-    // Calculate risk and reward ratio.
-    /* risk, reward, rewardRisk, minRewardRisk */
-    const {rrr} = this.calculateRiskAndReward(
-        mark,
-        sl,
-        tp,
-        side,
-        winRate,
-    );
 
-
-    const FIXED = 3;
-    // Number().toFixed(FIXED)
     // Store variable to proposal.
     this.proposal = {
       ...this.signalRfq,
-      price: Number(price).toFixed(FIXED),
-      qty: Number(positionSize).toFixed(FIXED),
-      riskExposureValue: Number(riskExposureValue).toFixed(FIXED),
-      riskExposurePercentage: Number(riskExposurePercentage).toFixed(FIXED),
-      stake: Number(stake).toFixed(FIXED),
-      balance: Number(balance).toFixed(FIXED),
-      tp: Number(tp).toFixed(FIXED),
-      sl: Number(sl).toFixed(FIXED),
-      rrr: Number(rrr).toFixed(FIXED),
-      leverage: Number(leverage).toFixed(FIXED),
+      price: CommonHelper.toPriceNumber(price),
+      qty: CommonHelper.toPriceNumber(positionSize),
+      riskExposureValue: CommonHelper.toPriceNumber(riskExposureValue),
+      riskExposurePercentage: CommonHelper.toPriceNumber(riskExposurePercentage),
+      stake: CommonHelper.toPriceNumber(stake),
+      balance: CommonHelper.toPriceNumber(balance),
+      stopLoss: CommonHelper.toPriceNumber(stopLoss),
+      leverage: CommonHelper.toPriceNumber(leverage),
+      winRate: CommonHelper.toPriceNumber(winRate),
       exchange,
     };
 
     await this.prepare();
   }
 
-  /**
-   * Get Take Profit and Stop Loss *
-   * @param {number} riskExposure -> Risk exposure.
-   * @return {{sl: (string|*), tp: (string|*)}}
-   */
-  getTpAndSlByAtr() {
-    // This function is subject to revamp.
-
-    const selectedATR = this.listOfPulseRfq.find((iPulse) => iPulse.pulse === "ATR").data;
-    const {side} = this.signalRfq;
-
-    const tp = side === "buy" ? selectedATR.buyTP :
-               side === "sell" ? selectedATR.sellTP : null;
-    const sl = side === "buy" ? selectedATR.buySL :
-               side === "sell" ? selectedATR.sellSL : null;
-
-    return {
-      tp,
-      sl,
-    };
+  getPulseStopLoss() {
+    const listOfPulses = ["STOP LOSS"];
+    const selectedPulse = this.listOfPulseRfq.find((iPulse) => listOfPulses.includes(iPulse.pulse)) || null;
+    return selectedPulse;
   }
 
-  calculateRiskAndReward(entryPrice, stopLoss, takeProfit, side, winRate) {
-    let risk; let reward;
+  getPulseLX() {
+    const listOfPulses = ["LX"];
+    const selectedPulse = this.listOfPulseRfq.find((iPulse) => listOfPulses.includes(iPulse.pulse)) || null;
+    return selectedPulse;
+  }
 
-    // Calculate risk and reward ratio for buy side.
-    if (side === "buy") {
-      risk = (entryPrice - stopLoss);
-      reward = (takeProfit - entryPrice);
-    } else if (side === "sell") {
-      risk = (takeProfit - entryPrice);
-      reward = (entryPrice - stopLoss);
-    }
+  getPulseTakeProfit() {
+    const listOfPulses = ["CCI200"];
+    const selectedPulse = this.listOfPulseRfq.find((iPulse) => listOfPulses.includes(iPulse.pulse)) || null;
+    return selectedPulse;
+  }
 
-    const rrr = reward / risk;
-    const riskPerReward = risk / reward;
-    const minRewardRisk = (1 / winRate) -1;
-
-
-    return {risk, reward, rrr, riskPerReward, minRewardRisk};
+  getPulseClosePosition() {
+    const listOfPulses = ["CLOSE POSITION"];
+    const selectedPulse = this.listOfPulseRfq.find((iPulse) => listOfPulses.includes(iPulse.pulse)) || null;
+    return selectedPulse;
   }
 
   calLeverageByPulse() {
@@ -281,20 +250,64 @@ exports.ProposalManager = class {
 
   async execute() {
     const {proposal} = this;
+    const {signal, pulse} = proposal;
+
+    const setupComplete = await this.setupOrder();
+    if (!setupComplete) {
+      throw new Error("Setup order failed");
+    }
+
+    let result;
+
+    if (signal) {
+      result = await this.placeLimit();
+    } else if (pulse === "STOP LOSS") {
+      result = await this.placeStopLoss();
+    }
+
+
+    // Mark proposal as executed.
+    await this.markProposalAsExecuted(result);
+    this.hasExecuted = true;
+  }
+
+  async setupOrder() {
+    const {proposal} = this;
+    const {exchange, symbol} = proposal;
+    const order = new OrderManager(exchange);
+
+    // Sanitized symbol.
+    const sanitizedSymbol = symbol.replace("/", "");
+
+    try {
+      // Set margin type to "isolated".
+      const marginResult = await order.adjMarginType(sanitizedSymbol, "ISOLATED");
+
+      // Set leverage.
+      const lvResult = await order.adjLeverage(sanitizedSymbol, proposal.leverage);
+      console.log("lvResult", lvResult);
+      console.log("marginResult", marginResult);
+    } catch (err) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // async placeMarket() {
+  //   const {proposal} = this;
+  //   const {symbol, exchange, qty, price, signal} = proposal;
+  //   throw new Error("Not implemented");
+  // }
+
+  async placeLimit() {
+    const {proposal} = this;
     const {symbol, exchange, qty, price} = proposal;
-    const order = new OrderManager(exchange, symbol);
-
-    // Set margin type to "isolated".
-    const marginResult = await order.adjMarginType(symbol, "ISOLATED");
-
-    // Set leverage.
-    const lvResult = await order.adjLeverage(symbol, proposal.leverage);
-
-    console.log("lvResult", lvResult);
-    console.log("marginResult", marginResult);
-
+    const order = new OrderManager(exchange);
+    let ret;
+    // Place order.
     const exeOrder = {symbol, qty, price};
-    let ret = null;
+
     if (proposal.side === "buy") {
       ret = await order.buyLimit(exeOrder);
     } else if (proposal.side === "sell") {
@@ -302,79 +315,28 @@ exports.ProposalManager = class {
     } else {
       throw new Error("Invalid side");
     }
-    const {result} = ret;
-
-    // Mark proposal as executed.
-    await this.markProposalAsExecuted(result);
-    this.hasExecuted = true;
+    return ret;
   }
 
-  async cancel() {
-    const db = this.getDB();
-
-    // Cancel current proposal.
-    const proposalRef = db.collection("proposals").doc(this.proposal.id);
-    await proposalRef.update({
-      status: "cancelled",
-    });
-  }
-
-  async validate() {
-    // this.orderManager.validateProposal(this.proposal);
-
-    // 1. Get positions, open orders.
+  async placeStopLoss() {
     const {proposal} = this;
-    const balance = await this.orderManager.getBalance();
-    const positions = await this.orderManager.getPositions(proposal.symbol);
-    const openOrders = await this.orderManager.getOpenOrders(proposal.symbol);
+    const {symbol, exchange, qty, price} = proposal;
+    const order = new OrderManager(exchange);
+    let ret;
+    // Place order.
+    const exeOrder = {symbol, qty, price};
 
-
-    // 2. Reject if there is any the same side open order, positions.
-    const testSameSizePosition = positions.find((iPosition) => iPosition.side === proposal.side);
-    if (testSameSizePosition) {
-      return {
-        error: "There is already a same side open order.",
-        result: false,
-      };
-    }
-
-    const testSameSidePosition = openOrders.find((iOrder) => iOrder.side === proposal.side);
-    if (testSameSidePosition) {
-      return {
-        error: "There is already a same side position.",
-        result: false,
-      };
-    }
-
-    // 3. Reject if obsolete.
-    if (proposal.expirationTime < new Date().getTime()) {
-      return {
-        error: "Proposal is obsolete.",
-        result: false,
-      };
-    }
-
-    // 4. Reject if insufficient balance.
     if (proposal.side === "buy") {
-      if (balance.available < proposal.entry * proposal.size) {
-        return {
-          error: "Insufficient balance.",
-          result: false,
-        };
-      }
+      ret = await order.sell;
+    } else if (proposal.side === "sell") {
+      ret = await order.sellLimit(exeOrder);
+    } else {
+      throw new Error("Invalid side");
     }
+    return ret;
+  }
 
-    // 5. Reject if exceeding max open order.
-    if (openOrders.length >= 10) {
-      return {
-        error: "Exceeding max open order.",
-        result: false,
-      };
-    }
-
-    return {
-      error: null,
-      result: true,
-    };
+  async placeTakeProfit() {
+    throw new Error("Not implemented");
   }
 };

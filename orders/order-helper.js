@@ -433,7 +433,6 @@ exports.OrderManager = class {
     return flattened;
   }
 
-
   /**
      *
      * @param {{symbol: string, qty: number, price: number}} orderProposal - The order proposal to place.
@@ -482,6 +481,56 @@ exports.OrderManager = class {
       result,
       error,
       data,
+    };
+  }
+
+  async placeStopLoss(orderProposal, options) {
+    let error;
+    let result;
+    const symbol = sanitizeSymbol(orderProposal.symbol);
+
+    const {
+      buyStopLossPrice,
+      sellStopLossPrice,
+      buyStopLossQty,
+      sellStopLossQty,
+      clientOrderId,
+    } = orderProposal;
+
+    if (buyStopLossPrice) {
+      // futuresSell(symbol: _symbol, quantity: number, price: number, params?: any): Promise<any>;
+      result = await this.binance.futuresSell(
+          symbol,
+          sellStopLossQty,
+          sellStopLossPrice,
+          {
+            newClientOrderId: clientOrderId,
+            stopPrice: buyStopLossPrice,
+            type: "STOP_LOSS",
+            timeInForce: "GTC",
+            priceProtect: true,
+          },
+      );
+    } else if (sellStopLossPrice) {
+      // futuresBuy(symbol: _symbol, quantity: number, price: number, params?: any): Promise<any>;
+      result = await this.binance.futuresBuy(
+          symbol,
+          buyStopLossQty,
+          buyStopLossPrice,
+          {
+            newClientOrderId: clientOrderId,
+            stopPrice: sellStopLossPrice,
+            type: "STOP_LOSS",
+            timeInForce: "GTC",
+            priceProtect: true,
+          },
+      );
+    } else {
+      error = new Error("Missing stop loss price");
+    }
+    return {
+      result,
+      error,
     };
   }
 
@@ -668,18 +717,6 @@ exports.OrderManager = class {
 
     };
   }
-
-  // async closeOrder(orderProposal) {
-  //   throw new Error("Method not implemented.");
-  // }
-  //
-
-  //
-  // async validateOrder(side, price, quantity, orderType) {
-  //   throw new Error("Method not implemented.");
-  // }
-
-  // futuresCountdownCancelAll
 
   /**
      * @param {any?} options - An options object.

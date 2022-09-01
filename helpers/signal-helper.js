@@ -8,7 +8,7 @@ const os = require("os");
 const {CommonHelper} = require("./common-helper");
 const hostname = os.hostname();
 
-const DEBUG_IGNORE_FULL_FILTER = true;
+const DEBUG_IGNORE_FULL_FILTER = false;
 
 
 const SEPERATOR = "##########";
@@ -278,6 +278,31 @@ exports.SignalHelper = class SignalHelper {
     await batch.commit();
   }
 
+  static async cleanUp(dataType) {
+    // Raise error if dataType is not valid.
+    if (!["signals", "pulses"].includes(dataType)) {
+      throw new Error("Invalid dataType");
+    }
+
+    // Update read records.
+    const db = getDB();
+    const collection = db.collection(dataType);
+    // Find all records that are not read.
+    const snapshot = await collection.where("hostname", "==", "codeengines-MacBook-Pro.local").get();
+    const readRecs = snapshot.docs;
+
+    // Delete all records that are not read by chunk.
+    const chunkSize = 500;
+    const chunked = _.chunk(readRecs, chunkSize);
+    for (let i = 0; i < chunked.length; i++) {
+      const batch = db.batch();
+      chunked[i].forEach((row) => {
+        batch.delete(collection.doc(row.id));
+      });
+      await batch.commit();
+    }
+  }
+
   static async signalHandler(data) {
     // Store text data from request body.
     const text = data;
@@ -286,8 +311,6 @@ exports.SignalHelper = class SignalHelper {
 
     const json = SignalHelper.formatSignalMayMae(text);
 
-
-    admin.initializeApp();
 
     const db = getDB();
     const collection = db.collection(SIGNAL_COLLECTION);

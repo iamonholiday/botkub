@@ -1,5 +1,5 @@
 const _ = require("lodash");
-
+const crypto = require("crypto");
 /**
  * Common Helper
  */
@@ -38,5 +38,18 @@ exports.CommonHelper = class {
     });
 
     return mapped;
+  }
+
+  static toPriceNumber(value) {
+    const FIXED_LENGTH = 3;
+    return Number(parseFloat(value).toFixed(FIXED_LENGTH));
+  }
+
+  static hashCode(data) {
+    // Digest data with seed.
+    const hash = crypto.createHash("sha256");
+    hash.update(data);
+    const digest = hash.digest("hex");
+    return digest;
   }
 };
