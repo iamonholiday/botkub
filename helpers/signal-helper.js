@@ -31,7 +31,8 @@ const PULSE_COLLECTION = "pulses";
 const SIGNAL_COLLECTION = "signals";
 
 const toNumber = (value) => {
-  return Number(parseFloat(value).toFixed(FIXED_LENGTH));
+  const sanitized = value.toString().replace(/,/g, "");
+  return Number(parseFloat(sanitized).toFixed(FIXED_LENGTH));
 };
 const toDate = (value) => {
   if (value.toDate) {
@@ -137,7 +138,9 @@ exports.SignalHelper = class SignalHelper {
     const body = data.split(SEPERATOR).slice(1);
     const json = body.map((row) => {
       // eslint-disable-next-line max-len
-      let [pulse, ticker, time, interval, mark, cci200, expiry, exchange] = row.split("|");
+      let [
+        pulse, ticker, time, interval, mark, cci200, tpBuy, tpSell, expiry, exchange,
+      ] = row.split("|");
 
       // common fields
       const symbol = ticker;
@@ -148,10 +151,13 @@ exports.SignalHelper = class SignalHelper {
       expiry = toDate(expiry);
 
       // pulse fields.
-      cci200 = toNumber(cci200); // parseFloat(cci200).toFixed(FIXED_LENGTH);
+      cci200 = CommonHelper.toPriceNumber(cci200);
+      tpBuy = CommonHelper.toPriceNumber(tpBuy);
+      tpSell = CommonHelper.toPriceNumber(tpSell);
+
 
       return {
-        pulse, symbol, time, interval, mark, cci200, expiry, exchange, obsoletedFlag, hostname, usedTime,
+        pulse, symbol, time, interval, mark, cci200, tpBuy, tpSell, expiry, exchange, obsoletedFlag, hostname, usedTime,
       };
     });
 
@@ -250,7 +256,7 @@ exports.SignalHelper = class SignalHelper {
 
       // Make sure json is not undefined or empty.
       if (!json || json.length === 0) {
-        return [];
+        return null;
       }
     } catch (error) {
       // log error.

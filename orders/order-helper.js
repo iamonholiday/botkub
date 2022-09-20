@@ -14,6 +14,7 @@
  */
 require("dotenv").config();
 const Binance = require("node-binance-api");
+const {CommonHelper} = require("../helpers/common-helper");
 
 const MAX_SYMBOL_NUMBERS = 12;
 const MIN_LEVERAGE = 1;
@@ -21,23 +22,48 @@ const MAX_LEVERAGE = 125;
 const MARGIN_TYPES = ["ISOLATED", "CROSSED"];
 const MAX_SYMBOL_QUERY = 1000;
 
+const PULSES_TAKE_PROFIT_LIST = ["CCI200", "TAKE PROFIT"];
+const PULSES_STOP_LOSS_LIST = ["STOP LOSS"];
+
 const sanitizeSymbol = (symbol) => {
   // Replace "PERP" with "".
   return symbol.replace(/PERP$/g, "");
 };
 
-exports.OrderManager = class {
-  /**
-     * @param {'binance'} market - The market to get the ticker for.
-     */
-  constructor(market = "binance") {
-    this.market = market;
-    this.binance = new Binance().options({
+exports.OrderManager = class OrderManager {
+  static getExchangeInstance() {
+    const instance = new Binance().options({
       APIKEY: process.env.BINANCE_API_KEY,
       APISECRET: process.env.BINANCE_API_SECRET,
       useServerTime: true, // If you get timestamp errors, synchronize to server time at startup
       test: true, // If you want to use sandbox mode where orders are simulated
     });
+    return instance;
+  }
+
+  /**
+     * @param {'binance'} market - The market to get the ticker for.
+     */
+  constructor(market = "binance") {
+    this.market = market;
+    this.binance = OrderManager.getExchangeInstance();
+  }
+
+  static async ping() {
+    let ret;
+
+    try {
+      const instance = OrderManager.getExchangeInstance();
+      ret = await instance.futuresTime();
+    } catch (err) {
+      return {
+        error: err,
+      };
+    }
+
+    return {
+      result: ret,
+    };
   }
 
   /**
@@ -226,13 +252,9 @@ exports.OrderManager = class {
 
     const listOfPos = await this.binance.futuresPositionRisk();
 
-    let filtered = symbols.length > 0 ?
+    const filtered = symbols.length > 0 ?
             listOfPos.filter((p) => symbols.includes(p.symbol)) :
             listOfPos;
-
-    // Remove positionAmt === "0" from filtered.
-    filtered = filtered.filter((ie) => Number(ie.positionAmt) > 0);
-
 
     return filtered;
   }
@@ -284,7 +306,7 @@ exports.OrderManager = class {
 
     // Loop async call.
     const openOrders = await Promise.all(symbols.map(async (iSymbol) => {
-      return await this.binance.futuresOpenOrders(iSymbol);
+      return await this.binance.futuresOpenOrders(sanitizeSymbol(iSymbol));
     }));
 
     // Flatten array.
@@ -485,125 +507,154 @@ exports.OrderManager = class {
   }
 
   async placeStopLoss(orderProposal, options) {
-    let error;
-    let result;
     const symbol = sanitizeSymbol(orderProposal.symbol);
-
     const {
-      buyStopLossPrice,
-      sellStopLossPrice,
-      buyStopLossQty,
-      sellStopLossQty,
-      clientOrderId,
+      buyStopLoss,
+      sellStopLoss,
+      qty,
+      mark: entryPrice,
     } = orderProposal;
 
-    if (buyStopLossPrice) {
-      // futuresSell(symbol: _symbol, quantity: number, price: number, params?: any): Promise<any>;
-      result = await this.binance.futuresSell(
+    const type = "STOP";
+    const quantity = qty;
+
+    // If buyStopLoss is true, then use futuresSell.
+    // Otherwise, use futuresBuy.
+    const action = buyStopLoss ?
+        this.binance.futuresSell :
+        this.binance.futuresBuy;
+
+    const stopLoss = buyStopLoss ? buyStopLoss : sellStopLoss;
+
+    let res;
+    try {
+      res = await action(
           symbol,
-          sellStopLossQty,
-          sellStopLossPrice,
+          Math.abs(quantity),
+          entryPrice,
           {
-            newClientOrderId: clientOrderId,
-            stopPrice: buyStopLossPrice,
-            type: "STOP_LOSS",
-            timeInForce: "GTC",
-            priceProtect: true,
+            stopPrice: CommonHelper.toPriceNumber(stopLoss, 2),
+            type: type,
+            workingType: "MARK_PRICE",
           },
       );
-    } else if (sellStopLossPrice) {
-      // futuresBuy(symbol: _symbol, quantity: number, price: number, params?: any): Promise<any>;
-      result = await this.binance.futuresBuy(
-          symbol,
-          buyStopLossQty,
-          buyStopLossPrice,
-          {
-            newClientOrderId: clientOrderId,
-            stopPrice: sellStopLossPrice,
-            type: "STOP_LOSS",
-            timeInForce: "GTC",
-            priceProtect: true,
-          },
-      );
+    } catch (error) {
+      return {
+        error: error,
+      };
+    }
+
+    return {
+      result: res,
+    };
+  }
+
+  async placeTakeProfit(orderProposal, options) {
+    const symbol = sanitizeSymbol(orderProposal.symbol);
+    const {
+      tpBuy: buyTakeProfit,
+      tpSell: sellTakeProfit,
+      qty,
+    } = orderProposal;
+
+    const type = "TAKE_PROFIT";
+    const quantity = qty;
+
+    // If buyTakeProfit is true, then use futuresSell.
+    // Otherwise, use futuresBuy.
+    let action;
+    let price;
+
+    if (!(buyTakeProfit ^ sellTakeProfit)) {
+      return {
+        error: "Invalid take profit order proposal",
+      };
+    } else if (buyTakeProfit) {
+      action = this.binance.futuresSell;
+      price = CommonHelper.toPriceNumber(buyTakeProfit);
     } else {
-      error = new Error("Missing stop loss price");
+      action = this.binance.futuresBuy;
+      price = CommonHelper.toPriceNumber(sellTakeProfit);
     }
-    return {
-      result,
-      error,
-    };
-  }
 
-  /**
-     *
-     * @param {OrderProposal} orderProposal - The order proposal to place.
-     * @return {Promise<any>}
-     */
-  async buyMarket(orderProposal, options) {
-    const resp = options ?
-        await this.binance.futuresMarketSell(orderProposal.symbol, orderProposal.qty, orderProposal.price, options) :
-        await this.binance.futuresMarketSell(orderProposal.symbol, orderProposal.qty, orderProposal.price);
+    const takeProfit = buyTakeProfit ? buyTakeProfit : sellTakeProfit;
 
-    return {
-      result: resp,
-
-    };
-  }
-
-  /**
-     *
-     * @param {OrderProposal} orderProposal - The order proposal to place.
-     * @return {Promise<any>}
-     */
-  async sellMarket(symbol, qty, options) {
-    let resp;
-    let error;
+    let res;
     try {
-      resp = options ?
-          await this.binance.futuresMarketSell(symbol, qty, options) :
-          await this.binance.futuresMarketSell(symbol, qty);
-    } catch (e) {
-      error = e;
+      res = await action(
+          symbol,
+          Math.abs(quantity),
+          price,
+          {
+            stopPrice: CommonHelper.toPriceNumber(takeProfit, 2),
+            type: type,
+            workingType: "CONTRACT_PRICE",
+          },
+      );
+    } catch (error) {
+      return {
+        error: error,
+      };
     }
 
     return {
-      result: resp,
-      error,
+      result: res,
     };
   }
 
-  /**
-   * @param {'BUY' | 'SELL'} side -> The side of the order.
-   * @param {string} symbol -> The symbol to place the order.
-   * @param {number} qty -> The quantity to place the order.
-   * @param {any} options -> Options.
-   * @return {Promise<{result, error}>}
-   */
-  async takeProfitMarket(side, symbol, qty, stopPrice) {
-    let resp;
-    let error;
+  async sanitizeOrder(orderProposal) {
+    const {signal, pulse, symbol} = orderProposal;
+    let listOfOrders;
+    const results = [];
 
-    const options = {
-      type: "TAKE_PROFIT_MARKET",
-      stopPrice,
-    };
+    if (PULSES_TAKE_PROFIT_LIST.includes(pulse)) {
+      // If pulse is take profit, then cancel all take profit orders.
+      listOfOrders = (await this.getOpenOrders(symbol)).filter((iOrder) => {
+        return ["TAKE_PROFIT", "TAKE_PROFIT_MARKET"].includes(iOrder.type);
+      } );
 
-    try {
-      if (side === "BUY") {
-        resp = this.binance.futuresMarketBuy(symbol, qty, options);
-      } else if (side === "SELL") {
-        resp = await this.binance.futuresMarketSell(symbol, qty, options);
-      } else {
-        throw new Error(`Invalid side: ${side}`);
+      // For loop to cancel all orders.
+      for (const iOrder of listOfOrders) {
+        // Log the order.
+        console.log(iOrder);
+
+        const {result: cancelResult} = await this.cancelOrder(
+            sanitizeSymbol(symbol),
+            iOrder.orderId);
+        results.push(cancelResult);
       }
-    } catch (e) {
-      error = e;
+    } else if (PULSES_STOP_LOSS_LIST.includes(pulse)) {
+      // If the pulse is stop loss, then cancel all stop loss orders.
+      listOfOrders = (await this.getOpenOrders(symbol)).filter((iOrder) => {
+        return ["STOP", "STOP_MARKET"].includes(iOrder.type);
+      } );
+
+      // For loop to cancel all orders.
+      for (const iOrder of listOfOrders) {
+        // Log the order.
+        console.log(iOrder);
+
+        const {result: cancelResult} = await this.cancelOrder(
+            sanitizeSymbol(symbol),
+            iOrder.orderId,
+        );
+        results.push(cancelResult);
+      }
+    } else if (signal) {
+      // If signal is true, then clear all orders.
+      listOfOrders = await this.getOpenOrders(symbol);
+      // For loop to cancel all orders.
+      for (const iOrder of listOfOrders) {
+        // Log the order.
+        console.log(iOrder);
+
+        const {result: cancelResult} = await this.cancelOrder(sanitizeSymbol(symbol),
+            iOrder.orderId);
+        results.push(cancelResult);
+      }
     }
 
-    return {
-      result: resp,
-      error,
-    };
+    return results;
   }
 
   /**
@@ -687,20 +738,27 @@ exports.OrderManager = class {
      * @param {Ordered} ordered
      * @return {Promise<void>}
      */
-  async cancelOrder(symbol, ordered) {
+  async cancelOrder(symbol, orderId) {
     // Make sure symbol is not empty.
     if (!symbol) {
       return {
         error: "Symbol is required",
       };
     }
-    // Make sure ordered has orderId.
-    if (!ordered.orderId) {
+
+    let respCancelOrder;
+    try {
+      respCancelOrder = await this.binance.futuresCancel(symbol, {
+
+        orderId: orderId,
+
+      });
+    } catch (error) {
       return {
-        error: "OrderId is required",
+        error: error,
       };
     }
-    const respCancelOrder = await this.binance.cancelOrder(symbol, ordered);
+
     return {
       result: respCancelOrder,
     };

@@ -1,3 +1,5 @@
+const {OrderManager} = require("./orders/order-helper");
+const line = require("@line/bot-sdk");
 const _ = require("lodash");
 const {CommonHelper} = require("./helpers/common-helper");
 const {ProposalManager} = require("./proposals");
@@ -25,7 +27,7 @@ const doPost = async (functionName, body) => {
   return res.json();
 };
 
-const getEnviromentToken = () => {
+const getEnvironmentToken = () => {
   const {env} = process;
   const {BINANCE_API_KEY, BINANCE_API_SECRET} = env;
   const rawData = `${BINANCE_API_KEY}:${BINANCE_API_SECRET}`;
@@ -34,10 +36,35 @@ const getEnviromentToken = () => {
 };
 
 const sanitizedData = (data) => {
-  const seperator = "##########";
-  const [head, body] = data.split(seperator);
-  const newData = `${head}${seperator}${body}`;
+  const separator = "##########";
+  const [head, body] = data.split(separator);
+  const newData = `${head}${separator}${body}`;
   return newData;
+};
+
+const pushMessageToLine = async (text, type = "text") => {
+  // Store line token.
+  const {env} = process;
+  const {LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_ID} = env;
+  // LINE_CHANNEL_ACCESS_SECRET
+
+  const client = new line.Client({
+    channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
+    // channelSecret: LINE_CHANNEL_ACCESS_SECRET,
+  });
+
+  const message = {
+    type,
+    text,
+  };
+
+  let pushResult;
+  try {
+    pushResult = await client.pushMessage(LINE_CHANNEL_ID, message);
+  } catch (e) {
+    console.log(e);
+  }
+  return pushResult;
 };
 
 exports.cleanData = functions.https.onRequest(async (req, res) => {
@@ -45,7 +72,7 @@ exports.cleanData = functions.https.onRequest(async (req, res) => {
   const {dataType, token} = req.body;
 
   // Validate token.
-  const hash = getEnviromentToken();
+  const hash = getEnvironmentToken();
   if (hash !== token) {
     res.status(403).send("Invalid token");
     return;
@@ -69,8 +96,16 @@ exports.generateToken = functions.https.onRequest(async (req, res) => {
 });
 
 exports.updateByData = functions.https.onRequest(async (req, res) => {
-  const hash = getEnviromentToken();
+  pushMessageToLine("ake test").then(() => {});
+
+  return {
+    message: "oke",
+
+  };
+  // eslint-disable-next-line no-unreachable
+  const hash = getEnvironmentToken();
   const token = _.last(req.body.split("|"));
+  let message;
 
   if (hash !== token) {
     res.status(403).send("Invalid token");
@@ -93,10 +128,16 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
     ret = {message: "Signal has been updated successfully."};
 
     const recSignal = await SignalHelper.readSignal(exchange, symbol, interval, signal, side);
-    const recPulses = await SignalHelper.readPulse(exchange, symbol, interval);
+    if (!recSignal) {
+      return res.status(404).send({
+        error: "Signal not meet criteria.",
+      });
+    }
 
+    const recPulses = await SignalHelper.readPulse(exchange, symbol, interval);
     const toProposal = {
       signal: recSignal,
+      pulse: null,
       pulses: recPulses,
     };
 
@@ -105,6 +146,7 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
         .then((result) => {
           functions.logger.info("result", "result", result);
         });
+    // eslint-disable-next-line no-unreachable
   } else if (dataType === "pulse") {
     const {
       exchange,
@@ -115,20 +157,39 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
     ret ={message: "Pulse has been successfully."};
 
     const returnedRecs = await SignalHelper.readPulse(exchange, symbol, interval, pulse);
-
+    const triggerPulse = returnedRecs.find((iPulse) => iPulse.pulse === pulse);
     const toProposal = {
       signal: null,
+      pulse: triggerPulse,
       pulses: returnedRecs,
     };
 
     const ALLOW_PULSE_PROPOSAL_LIST = ["STOP LOSS", "CCI200"];
     if (ALLOW_PULSE_PROPOSAL_LIST.includes(pulse)) {
+      // Store message as proposal is being executed.
+      message = [
+        `Proposal of ${symbol} is being executed.`,
+        `- Pulse: ${pulse}`,
+        `- Exchange: ${exchange}`,
+        `- Interval: ${interval}`,
+        `- Time: ${new Date().toLocaleString()}`,
+      ].join("\n");
+      pushMessageToLine(message).then(() => {});
+
       // Spawn proposals.
+      // eslint-disable-next-line no-unreachable
       doPost("exeProposal", toProposal)
           .then((result) => {
             functions.logger.info("result", "result", result);
           });
+
+
+      // eslint-disable-next-line no-unreachable
+      return {
+        message,
+      };
     }
+    // eslint-disable-next-line no-unreachable
   } else {
     // Log respond data.
     functions.logger.info("error", "dataType is not found", dataType);
@@ -142,19 +203,53 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
 
 
 /**
- * Receive JSON for excecute proposal.
+ * Receive JSON for execute proposal.
  */
 exports.exeProposal = functions.https.onRequest(async (req, res) => {
   // Log request data.
   functions.logger.info("req.body", "req.body", req.body);
 
+  const {error: pingError, result: pingResult} = await OrderManager.ping();
+  if (pingError) {
+    // Log error.
+    functions.logger.info("error", "ping error not be able to init communication to Binance server.", pingError);
 
-  const {signal, pulses} = req.body;
+    return res.status(500).send({
+      error: pingError,
+    });
+  } else {
+    // Log result.
+    functions.logger.info("result", "ping result", pingResult);
+  }
+
+  const {signal, pulse, pulses} = req.body;
   const signalRFQ = signal ? ProposalManager.createSignalRFQ(signal) : null;
-  const pulseRFQ = pulses.map((iPulse) => ProposalManager.createPulseRFQ(iPulse));
+  const pulseRFQ = pulse ? ProposalManager.createPulseRFQ(pulse) : null;
+  const listOfPulseRFQ = pulses.map((iPulse) => ProposalManager.createPulseRFQ(iPulse));
+  const proposal = new ProposalManager(signalRFQ, pulseRFQ, ...listOfPulseRFQ);
 
+  try {
+    await proposal.preparePurchaseOrder();
+    await proposal.execute();
 
-  const proposal = new ProposalManager(signalRFQ, pulseRFQ);
-  await proposal.execute();
-  console.log( signal, pulses, signalRFQ, pulseRFQ);
+    const executedMessage = [
+      `Proposal of ${proposal.symbol} has been executed.`,
+      `- Signal: ${proposal.signal ? proposal.signal.signal : "N/A"}`,
+      `- Pulse: ${proposal.pulse ? proposal.pulse.pulse : "N/A"}`,
+      `- Exchange: ${proposal.exchange}`,
+
+    ].join("\n");
+
+    pushMessageToLine(executedMessage).then(() => {});
+    console.log( signal, pulse, pulses, signalRFQ, pulseRFQ, listOfPulseRFQ);
+    res.send({
+      message: "Proposal has been executed successfully.",
+    });
+  } catch (err) {
+  // Log error.
+    functions.logger.info("error", "error", err);
+    return res.status(500).send({
+      error: err,
+    });
+  }
 });

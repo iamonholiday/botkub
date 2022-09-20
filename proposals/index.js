@@ -2,6 +2,7 @@ const {OrderManager} = require("../orders/order-helper");
 const admin = require("firebase-admin");
 const serviceAccount = require("../serviceAccount.json");
 const {CommonHelper} = require("../helpers/common-helper");
+const {logger} = require("firebase-functions");
 
 const initApp = () => {
   // Check if the app is initialized.
@@ -14,6 +15,8 @@ const initApp = () => {
 };
 
 const STAKE_PERCENTAGE = .1;
+
+const ASSET = "USDT";
 
 exports.ProposalManager = class {
   static createSignalRFQ(data) {
@@ -71,25 +74,21 @@ exports.ProposalManager = class {
     const riskExposurePercentage = .02;
     const requestType = "pulse";
 
-    const {
-
-      lx, // LX
-      buyTP, buySL, sellTP, sellSL, // ATR
-      cci200, // CCI200
-      fastEMA, slowEMA, // EMA
-      buyStopLoss, sellStopLoss, // StopLoss
-    } = rawData;
-
-    const data =
-        pulse === "LX" ? {lx} :
-            pulse === "ATR" ? {buyTP, buySL, sellTP, sellSL} :
-                pulse === "CCI200" ? {cci200} :
-                    pulse === "EMA" ? {fastEMA, slowEMA} :
-                        pulse === "STOP LOSS" ? {buyStopLoss, sellStopLoss} :
-                        {};
-
+    let side;
+    if (pulse === "STOP LOSS" && rawData.buyStopLoss) {
+      side = "buy";
+    } else if (pulse === "STOP LOSS" && rawData.sellStopLoss) {
+      side = "sell";
+    }
 
     return {
+
+      // Extended data for pulse.
+      ...rawData,
+
+      side,
+
+      // Common data.
       pulse,
       symbol,
       time,
@@ -101,7 +100,7 @@ exports.ProposalManager = class {
       riskExposurePercentage,
       expiry,
       exchange,
-      data,
+
     };
   }
 
@@ -116,8 +115,9 @@ exports.ProposalManager = class {
       * @param {SignalRFQ} signalRfq -> SignalRFQ.
       * @param {PulseRFQ} pulseRfq -> PulseRFQ.
   */
-  constructor(signalRfq, ...listOfPulseRfq) {
+  constructor(signalRfq, pulseRfq, ...listOfPulseRfq) {
     this.signalRfq = signalRfq;
+    this.pulseRfq = pulseRfq;
     this.listOfPulseRfq = listOfPulseRfq;
     this.orderManager = new OrderManager();
     this.proposal = {};
@@ -126,27 +126,42 @@ exports.ProposalManager = class {
   }
 
   async preparePurchaseOrder() {
+    if (this.signalRfq) {
+      await this.preparePurchaseOrderBySignal();
+    } else if (["STOP LOSS"].includes(this.pulseRfq?.pulse)) {
+      await this.preparePurchaseOrderByPulseStopLoss();
+    } else if (["TAKE PROFIT", "CCI200"].includes(this.pulseRfq?.pulse)) {
+      await this.preparePurchaseOrderByPulseTakeProfit();
+    } else if (["CLOSE POSITION"].includes(this.pulseRfq?.pulse)) {
+      throw new Error("Not implemented");
+    } else {
+      throw new Error("Not implemented");
+    }
+  }
+
+  async preparePurchaseOrderBySignal() {
     if (this.hasPrepared) {
       return;
     }
 
     const asset = "USDT";
     const {symbol, riskExposurePercentage,
-      side, mark, winRate, expiry, exchange, stopLoss,
+      side, entry, winRate, expiry, exchange, stopLoss,
     } = this.signalRfq;
+
+    // Entry and Mark are the same value for signal.
+    const mark = entry;
 
     // Raise error if expiry is less than current time.
     if (expiry < Date.now()) {
-      throw new Error("Proposal is expired");
+      throw new Error("Proposal is expired.");
     }
-
 
     const balances = await this.orderManager.getBalances(asset);
     const {balance} = balances.find((iBalance) => iBalance.asset === "USDT");
     const riskExposureValue = balance * riskExposurePercentage;
     const stake = balance * STAKE_PERCENTAGE;
     const positionSize = riskExposureValue / Math.abs(mark - stopLoss); // (stake / mark).toFixed(3);
-
 
     // Calculate the leverage.
     const leverageByPositionSize = (positionSize * mark) / stake;
@@ -155,10 +170,8 @@ exports.ProposalManager = class {
     const leverage = leverageByPulse === null ? leverageByPositionSize :
         leverageByPulse;
 
-
     const {bidPrice, askPrice} = await this.orderManager.getQuote(symbol);
     const price = side === "buy" ? bidPrice : askPrice;
-
 
     // Store variable to proposal.
     this.proposal = {
@@ -172,6 +185,140 @@ exports.ProposalManager = class {
       stopLoss: CommonHelper.toPriceNumber(stopLoss),
       leverage: CommonHelper.toPriceNumber(leverage),
       winRate: CommonHelper.toPriceNumber(winRate),
+      exchange,
+    };
+
+    await this.prepare();
+  }
+
+  async preparePurchaseOrderByPulseStopLoss() {
+    if (this.hasPrepared) {
+      return;
+    }
+
+
+    const {symbol, riskExposurePercentage,
+      mark, winRate, expiry, exchange, buyStopLoss, sellStopLoss,
+    } = this.pulseRfq;
+
+    const stopLoss =
+            buyStopLoss ?
+            buyStopLoss :
+            sellStopLoss ?
+            sellStopLoss :
+            null;
+
+    if (!stopLoss) {
+      throw new Error("Stop Loss is null.");
+    }
+
+    const side =
+        buyStopLoss ?
+        "buy" :
+        sellStopLoss ?
+        "sell" :
+        null;
+
+
+    // Raise error if expiry is less than current time.
+    if (expiry < Date.now()) {
+      throw new Error("Proposal is expired.");
+    }
+
+    const balances = await this.orderManager.getBalances(ASSET);
+    const listOfPosition = await this.orderManager.getPositions(this.sanitizeSymbolByRemovePERP(symbol));
+    const currentPosition = listOfPosition.find((position) => position.symbol === this.sanitizeSymbolByRemovePERP(symbol));
+    const {positionAmt} = currentPosition; // entryPrice,
+    const {balance} = balances.find((iBalance) => iBalance.asset === ASSET);
+    const riskExposureValue = balance * riskExposurePercentage;
+    const stake = balance * STAKE_PERCENTAGE;
+    const positionSize = positionAmt;
+
+    // riskExposureValue / Math.abs(entryPrice - stopLoss);
+    // if (!positionSize) {
+    //   positionSize = positionAmt;
+    // }
+
+    // Calculate the leverage.
+    let leverage = this.calLeverageByPulse();
+    // Manual calculate the leverage if no leverage pulse.
+    if (!leverage) {
+      leverage = (positionSize * mark) / stake;
+    }
+
+    const {bidPrice, askPrice} = await this.orderManager.getQuote(symbol);
+    const price = side === "buy" ? bidPrice : askPrice;
+
+    // Store variable to proposal.
+    this.proposal = {
+      ...this.pulseRfq,
+      price: CommonHelper.toPriceNumber(price),
+      qty: CommonHelper.toPriceNumber(positionSize),
+      riskExposureValue: CommonHelper.toPriceNumber(riskExposureValue),
+      riskExposurePercentage: CommonHelper.toPriceNumber(riskExposurePercentage),
+      stake: CommonHelper.toPriceNumber(stake),
+      balance: CommonHelper.toPriceNumber(balance),
+      stopLoss: CommonHelper.toPriceNumber(stopLoss),
+      leverage: CommonHelper.toPriceNumber(leverage),
+      winRate: CommonHelper.toPriceNumber(winRate),
+      exchange,
+    };
+
+    await this.prepare();
+  }
+
+  async preparePurchaseOrderByPulseTakeProfit() {
+    if (this.hasPrepared) {
+      return;
+    }
+
+
+    const {symbol, riskExposurePercentage,
+      winRate, expiry, exchange, tpBuy, tpSell,
+    } = this.pulseRfq;
+
+    let takeProfit; let side;
+    if (tpBuy) {
+      takeProfit = tpBuy;
+      side = "sell";
+    } else if (tpSell) {
+      takeProfit = tpSell;
+      side = "buy";
+    } else {
+      throw new Error("Take Profit is null.");
+    }
+
+
+    // Raise error if expiry is less than current time.
+    if (expiry < Date.now()) {
+      throw new Error("Proposal is expired.");
+    }
+
+    const balances = await this.orderManager.getBalances(ASSET);
+    const listOfPosition = await this.orderManager.getPositions(this.sanitizeSymbolByRemovePERP(symbol));
+    const currentPosition = listOfPosition.find((position) => position.symbol === this.sanitizeSymbolByRemovePERP(symbol));
+    const {positionAmt, entryPrice} = currentPosition; // ,
+    const {balance} = balances.find((iBalance) => iBalance.asset === ASSET);
+    const riskExposureValue = balance * riskExposurePercentage;
+    const stake = balance * STAKE_PERCENTAGE;
+    const positionAmtPeriod = positionAmt.split(".")[1].length;
+
+    const positionSize = CommonHelper.toQtyNumber(positionAmt / 2, positionAmtPeriod);
+
+
+    // Store variable to proposal.
+    this.proposal = {
+      ...this.pulseRfq,
+      price: CommonHelper.toPriceNumber(takeProfit),
+      qty: CommonHelper.toPriceNumber(positionSize),
+      riskExposureValue: CommonHelper.toPriceNumber(riskExposureValue),
+      riskExposurePercentage: CommonHelper.toPriceNumber(riskExposurePercentage),
+      stake: CommonHelper.toPriceNumber(stake),
+      balance: CommonHelper.toPriceNumber(balance),
+      takeProfit: CommonHelper.toPriceNumber(takeProfit),
+      winRate: CommonHelper.toPriceNumber(winRate),
+      side,
+      entryPrice: CommonHelper.toPriceNumber(entryPrice),
       exchange,
     };
 
@@ -203,14 +350,13 @@ exports.ProposalManager = class {
   }
 
   calLeverageByPulse() {
-    const {
-      lx: leverage,
-    } = this.listOfPulseRfq.find((pulse) => pulse.pulse === "LX").data;
-    if (!leverage) {
-      throw new Error("Leverage RFQ not found");
+    const found = this.listOfPulseRfq.find((pulse) => pulse.pulse === "LX");
+    if (found) {
+      const {lx} = found;
+      return Number(lx);
     }
 
-    return Number(leverage);
+    return null;
   }
 
   /**
@@ -250,34 +396,64 @@ exports.ProposalManager = class {
 
   async execute() {
     const {proposal} = this;
-    const {signal, pulse} = proposal;
+    const {signal, pulse, exchange} = proposal;
+    const SETUP_ERROR = "Setup order failed";
 
-    const setupComplete = await this.setupOrder();
-    if (!setupComplete) {
-      throw new Error("Setup order failed");
-    }
+    let res;
+    const order = new OrderManager(exchange);
 
-    let result;
+    // Sanitized order by symbol.
+    const cancelResult = await order.sanitizeOrder(proposal);
+
+    logger.info("cancelResult", cancelResult);
 
     if (signal) {
-      result = await this.placeLimit();
-    } else if (pulse === "STOP LOSS") {
-      result = await this.placeStopLoss();
+      const setupComplete = await this.setupOrder(true, true);
+      if (!setupComplete) {
+        throw new Error(SETUP_ERROR);
+      }
+      res = await this.placeLimit();
+    } else if (["STOP LOSS"].includes(pulse)) {
+      const setupComplete = await this.setupOrder(false, true);
+      if (!setupComplete) {
+        throw new Error(SETUP_ERROR);
+      }
+      res = await this.placeStopLoss();
+    } else if (["TAKE PROFIT", "CCI200"].includes(pulse)) {
+      const setupComplete = await this.setupOrder(false, true);
+      if (!setupComplete) {
+        throw new Error(SETUP_ERROR);
+      }
+      res = await this.placeTakeProfit();
     }
 
 
     // Mark proposal as executed.
-    await this.markProposalAsExecuted(result);
+    await this.markProposalAsExecuted(res.result);
     this.hasExecuted = true;
   }
 
-  async setupOrder() {
+  sanitizeSymbolByRemovePERP(symbol) {
+    // Remove PERP from symbol.
+    const sanitizedSymbol = symbol.replace(/PERP$/g, "");
+    return sanitizedSymbol;
+  }
+
+  async sanitizeOrder() {
+    const {proposal} = this;
+    const {exchange} = proposal;
+    const order = new OrderManager(exchange);
+    const ret = await order.placeTakeProfit(proposal);
+    return ret;
+  }
+
+  async setupOrder(setLeverage = true, setMarginType = true) {
     const {proposal} = this;
     const {exchange, symbol} = proposal;
     const order = new OrderManager(exchange);
 
     // Sanitized symbol.
-    const sanitizedSymbol = symbol.replace("/", "");
+    const sanitizedSymbol = this.sanitizeSymbolByRemovePERP(symbol);
 
     try {
       // Set margin type to "isolated".
@@ -293,12 +469,6 @@ exports.ProposalManager = class {
 
     return true;
   }
-
-  // async placeMarket() {
-  //   const {proposal} = this;
-  //   const {symbol, exchange, qty, price, signal} = proposal;
-  //   throw new Error("Not implemented");
-  // }
 
   async placeLimit() {
     const {proposal} = this;
@@ -320,23 +490,19 @@ exports.ProposalManager = class {
 
   async placeStopLoss() {
     const {proposal} = this;
-    const {symbol, exchange, qty, price} = proposal;
+    const {exchange} = proposal;
     const order = new OrderManager(exchange);
-    let ret;
-    // Place order.
-    const exeOrder = {symbol, qty, price};
-
-    if (proposal.side === "buy") {
-      ret = await order.sell;
-    } else if (proposal.side === "sell") {
-      ret = await order.sellLimit(exeOrder);
-    } else {
-      throw new Error("Invalid side");
-    }
+    const ret = await order.placeStopLoss(proposal);
     return ret;
   }
 
   async placeTakeProfit() {
-    throw new Error("Not implemented");
+    const {proposal} = this;
+    const {exchange} = proposal;
+    const order = new OrderManager(exchange);
+    const ret = await order.placeTakeProfit(proposal);
+    return ret;
   }
 };
+
+

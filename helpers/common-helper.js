@@ -40,9 +40,26 @@ exports.CommonHelper = class {
     return mapped;
   }
 
-  static toPriceNumber(value) {
-    const FIXED_LENGTH = 3;
-    return Number(parseFloat(value).toFixed(FIXED_LENGTH));
+  static toPriceNumber(value, decimal = 3) {
+    const temp = typeof value === "string" ? value.replace(",", "") : value;
+    return Number(parseFloat(temp).toFixed(decimal));
+  }
+
+  static toQtyNumber(value, decimal = 3) {
+    const temp = typeof value === "string" ? value.replace(",", "") : value;
+    let nValue = Number(parseFloat(temp).toFixed(decimal));
+
+    if (`${nValue}`.split(".")[1].length > decimal) {
+      return nValue;
+    } else {
+      let tempText = ".";
+      for (let i = 0; i < decimal - 1; i++) {
+        tempText += "0";
+      }
+      tempText += "1";
+      nValue = Number(tempText);
+    }
+    return nValue;
   }
 
   static hashCode(data) {

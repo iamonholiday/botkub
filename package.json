@@ -16,10 +16,12 @@
   },
   "main": "index.js",
   "dependencies": {
+    "@line/bot-sdk": "^7.5.2",
+    "axios": "^0.27.2",
     "dotenv": "^16.0.1",
     "firebase": "^9.9.3",
     "firebase-admin": "^9.2.0",
-    "firebase-functions": "^3.11.0",
+    "firebase-functions": "^3.23.0",
     "lodash": "^4.17.21",
     "node-binance-api": "^0.13.1",
     "node-fetch": "^3.2.10"
