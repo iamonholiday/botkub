@@ -17,18 +17,22 @@ const initApp = () => {
   // Check if the app is initialized.
   if (admin.apps.length === 0) {
     admin.initializeApp();
+    const firestore = admin.firestore();
+    firestore.settings({ignoreUndefinedProperties: true});
   }
 };
 
 const getDB = () => {
   initApp();
-  return admin.firestore();
+  const firestore = admin.firestore();
+  return firestore;
 };
 
 const FIXED_LENGTH = 3;
 
 const PULSE_COLLECTION = "pulses";
 const SIGNAL_COLLECTION = "signals";
+const PROPOSALS_COLLECTION = "proposals";
 
 const toNumber = (value) => {
   const sanitized = value.toString().replace(/,/g, "");
@@ -44,13 +48,14 @@ const toDate = (value) => {
 };
 
 exports.SignalHelper = class SignalHelper {
-  static formatSignalMayMae(data) {
-    // original data
-    // signal|side|ticker|time|interval|entry|stopLoss|fastLine|expiry|exchange
+  static formatSignal(data) {
+    // messageType|group|indy|side|ticker|time|interval|entry|mark|sl|leverage|expiry|exchange
     const body = data.split(SEPERATOR).slice(1);
     const json = body.map((row) => {
       // eslint-disable-next-line max-len
-      let [signal, side, ticker, time, interval, entry, stopLoss, fastLine, expiry, exchange] = row.split("|");
+      let [messageType, group, indy, side, ticker, time, interval, entry, mark, sl, leverage,
+        tp0, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9,
+        expiry, exchange] = row.split("|");
 
       // common fields
       const symbol = ticker;
@@ -59,15 +64,35 @@ exports.SignalHelper = class SignalHelper {
       time = toDate(time);
       entry = toNumber(entry);
       expiry = toDate(expiry);
+      mark = toNumber(mark);
 
+      side = side === "1" ? "buy" : "sell";
 
       // pulse fields.
-      stopLoss = toNumber(stopLoss); // parseFloat(stopLoss).toFixed(FIXED_LENGTH);
-      fastLine = toNumber(fastLine); // parseFloat(fastLine).toFixed(FIXED_LENGTH);
+      sl = toNumber(sl);
+      leverage = toNumber(leverage);
 
-      return {
-        signal, side, symbol, time, interval, entry, stopLoss, fastLine, expiry, exchange, obsoletedFlag, hostname, usedTime,
+      tp0 = toNumber(tp0);
+      tp1 = toNumber(tp1);
+      tp2 = toNumber(tp2);
+      tp3 = toNumber(tp3);
+      tp4 = toNumber(tp4);
+      tp5 = toNumber(tp5);
+      tp6 = toNumber(tp6);
+      tp7 = toNumber(tp7);
+      tp8 = toNumber(tp8);
+      tp9 = toNumber(tp9);
+
+      const retData = {
+        // core data.
+        messageType, group, indy, side, symbol, time, interval, entry, mark, sl, expiry, exchange,
+        leverage,
+        tp0, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9,
+        // extension.
+        obsoletedFlag, hostname, usedTime,
       };
+
+      return retData;
     });
 
     return json;
@@ -75,71 +100,46 @@ exports.SignalHelper = class SignalHelper {
 
   static formatPulseStopLoss(data) {
     // original data
-    // pulse|ticker|time|interval|mark|buyStopLoss|sellStopLoss|expiry|exchange##########STOP LOSS|BTCUSDTPERP|2022-08-30T12:55:00Z|5|20326.4|null|20406.584846685735|1661864700319|BINANCE
+    // messageType|group|indy|side|ticker|time|interval|entry|mark|sl|expiry|exchange
 
     const body = data.split(SEPERATOR).slice(1);
     const json = body.map((row) => {
       // eslint-disable-next-line max-len
-      let [pulse, ticker, time, interval, mark, buyStopLoss, sellStopLoss, expiry, exchange] = row.split("|");
+      let [messageType, group, indy, side, ticker, time, interval, entry, mark, sl, expiry, exchange] = row.split("|");
 
       // common fields
       const symbol = ticker;
       const obsoletedFlag = "n";
       const usedTime = null;
       time = toDate(time);
-      mark = toNumber(mark);
+      entry = toNumber(entry);
       expiry = toDate(expiry);
+      mark = toNumber(mark);
 
+      side = side === "1" ? "buy" : "sell";
 
-      // pulse fields.
-      buyStopLoss = toNumber(buyStopLoss); // parseFloat(buyStopLoss).toFixed(FIXED_LENGTH) || null;
-      sellStopLoss = toNumber(sellStopLoss); // parseFloat(sellStopLoss).toFixed(FIXED_LENGTH) || null;
 
       return {
-        pulse, symbol, time, interval, mark, buyStopLoss, sellStopLoss, expiry, exchange, obsoletedFlag, hostname, usedTime,
+        // core data.
+        messageType, group, indy, side, symbol, time, interval, entry, mark, sl,
+        expiry, exchange,
+        // extension.
+        obsoletedFlag, hostname, usedTime,
       };
     });
 
     return json;
   }
 
-  static formatPulseLX(data) {
+  static formatPulseTakeProfit(data) {
     // original data
-    // pulse|ticker|time|interval|mark|lx|expiry|exchange##########LX|BTCUSDTPERP|2022-08-30T12:55:00Z|5|20326.4|7|1661864700318|BINANCE
-
-    const body = data.split(SEPERATOR).slice(1);
-    const json = body.map((row) => {
-      // eslint-disable-next-line max-len
-      let [pulse, ticker, time, interval, mark, lx, expiry, exchange] = row.split("|");
-
-      // common fields
-      const symbol = ticker;
-      const obsoletedFlag = "n";
-      const usedTime = null;
-      time = toDate(time);
-      mark = toNumber(mark);
-      expiry = toDate(expiry);
-
-      // pulse fields.
-      lx = toNumber(lx); // parseFloat(lx).toFixed(FIXED_LENGTH);
-
-      return {
-        pulse, symbol, time, interval, mark, lx, expiry, exchange, obsoletedFlag, hostname, usedTime,
-      };
-    });
-
-    return json;
-  }
-
-  static formatPulseCCI200(data) {
-    // original data
-    // pulse|ticker|time|interval|mark|cci200|expiry|exchange##########CCI200|BTCUSDTPERP|2022-08-30T12:55:00Z|5|20326.4|80|1661864700318|BINANCE
+    // messageType|group|indy|side|ticker|time|interval|entry|mark|tp0|tp1|tp2|tp3|tp4|tp5|tp6|tp7|tp9|tp9|expiry|exchange
 
     const body = data.split(SEPERATOR).slice(1);
     const json = body.map((row) => {
       // eslint-disable-next-line max-len
       let [
-        pulse, ticker, time, interval, mark, cci200, tpBuy, tpSell, expiry, exchange,
+        messageType, group, indy, side, ticker, time, interval, entry, mark, tp0, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9, expiry, exchange,
       ] = row.split("|");
 
       // common fields
@@ -150,14 +150,27 @@ exports.SignalHelper = class SignalHelper {
       mark = toNumber(mark);
       expiry = toDate(expiry);
 
+      side = side === "1" ? "buy" : "sell";
+
       // pulse fields.
-      cci200 = CommonHelper.toPriceNumber(cci200);
-      tpBuy = CommonHelper.toPriceNumber(tpBuy);
-      tpSell = CommonHelper.toPriceNumber(tpSell);
+      const takeProfitList = [];
+      takeProfitList.push(toNumber(tp0));
+      takeProfitList.push(toNumber(tp1));
+      takeProfitList.push(toNumber(tp2));
+      takeProfitList.push(toNumber(tp3));
+      takeProfitList.push(toNumber(tp4));
+      takeProfitList.push(toNumber(tp5));
+      takeProfitList.push(toNumber(tp6));
+      takeProfitList.push(toNumber(tp7));
+      takeProfitList.push(toNumber(tp8));
+      takeProfitList.push(toNumber(tp9));
 
 
       return {
-        pulse, symbol, time, interval, mark, cci200, tpBuy, tpSell, expiry, exchange, obsoletedFlag, hostname, usedTime,
+        messageType, group, indy, side, symbol, time, interval, entry, mark, expiry, exchange,
+        takeProfitList,
+        obsoletedFlag, hostname, usedTime,
+
       };
     });
 
@@ -166,20 +179,21 @@ exports.SignalHelper = class SignalHelper {
 
   static getPulseName(data) {
     const body = data.split(SEPERATOR).slice(1);
-    const [pulse] = body[0].split("|");
-    return pulse;
+    // eslint-disable-next-line prefer-destructuring
+    const group = body[0].split("|")[1];
+    return group;
   }
 
   static isSignalOrPulse(data) {
-    if (data.indexOf("pulse") === 0) {
-      return "pulse";
-    } else if (data.indexOf("signal") === 0) {
+    if (data.indexOf(`${SEPERATOR}signal|`) > -1) {
       return "signal";
+    } else if (data.indexOf(`${SEPERATOR}pulse|`) > -1) {
+      return "pulse";
     }
-    return "";
+    return null;
   }
 
-  static async readPulse(exchange, symbol, interval, pulse = null) {
+  static async readPulse(exchange, symbol, interval, group = null) {
     const db = getDB();
     const collection = db.collection(PULSE_COLLECTION);
     // Query collection where ticker is equal to ticker and readTime is not exits.
@@ -197,8 +211,8 @@ exports.SignalHelper = class SignalHelper {
     }
 
     // If pulse was sent.
-    if (pulse) {
-      query = query.where("pulse", "==", pulse);
+    if (group) {
+      query = query.where("group", "==", group);
     }
 
     const snapshot = await query.get();
@@ -223,7 +237,7 @@ exports.SignalHelper = class SignalHelper {
     return ret;
   }
 
-  static async readSignal(exchange, symbol, interval, signal, side) {
+  static async readSignal(exchange, symbol, interval, messageType, side) {
     let json;
 
     try {
@@ -233,7 +247,7 @@ exports.SignalHelper = class SignalHelper {
           .where("exchange", "==", exchange)
           .where("symbol", "==", symbol)
           .where("interval", "==", interval)
-          .where("signal", "==", signal)
+          .where("messageType", "==", messageType)
           .where("side", "==", side)
 
       ;
@@ -259,8 +273,11 @@ exports.SignalHelper = class SignalHelper {
         return null;
       }
     } catch (error) {
-      // log error.
-      console.log(error);
+      if (error.message.indexOf("The query requires an index.") > -1) {
+        console.warn("The query requires an index. Please create index on firestore.");
+      } else {
+        console.log(error);
+      }
     }
 
     // Return latest signal.
@@ -312,12 +329,11 @@ exports.SignalHelper = class SignalHelper {
   static async signalHandler(data) {
     // Store text data from request body.
     const text = data;
+
     // Log text data.
-    functions.logger.info("data", data);
+    functions.logger.info("signalHandler:raw data", data);
 
-    const json = SignalHelper.formatSignalMayMae(text);
-
-
+    const json = SignalHelper.formatSignal(text);
     const db = getDB();
     const collection = db.collection(SIGNAL_COLLECTION);
 
@@ -325,7 +341,7 @@ exports.SignalHelper = class SignalHelper {
     const query = collection
         .where("symbol", "==", json[0].symbol)
         .where("interval", "==", json[0].interval)
-        .where("signal", "==", json[0].signal)
+        .where("messageType", "==", json[0].messageType)
         .where("obsoletedFlag", "==", "n")
     ;
     const snapshot = await query.get();
@@ -358,7 +374,7 @@ exports.SignalHelper = class SignalHelper {
       exchange: _.first(json).exchange,
       symbol: _.first(json).symbol,
       interval: _.first(json).interval,
-      signal: _.first(json).signal,
+      messageType: _.first(json).messageType,
       side: _.first(json).side,
     };
   }
@@ -369,17 +385,15 @@ exports.SignalHelper = class SignalHelper {
     let json;
 
     // Log text data.
-    functions.logger.info("data", data);
+    functions.logger.info("pulseHandler:raw data", data);
 
 
     const pulseName = SignalHelper.getPulseName(text);
 
     if (pulseName === "STOP LOSS") {
       json = SignalHelper.formatPulseStopLoss(text);
-    } else if (pulseName === "LX") {
-      json = SignalHelper.formatPulseLX(text);
-    } else if (pulseName === "CCI200") {
-      json = SignalHelper.formatPulseCCI200(text);
+    } else if (pulseName === "TAKE PROFIT LIST") {
+      json = SignalHelper.formatPulseTakeProfit(text);
     } else {
       functions.logger.info("error", "pulseName is not found", pulseName);
     }
@@ -391,7 +405,7 @@ exports.SignalHelper = class SignalHelper {
     const query = collection
         .where("symbol", "==", json[0].symbol)
         .where("interval", "==", json[0].interval)
-        .where("pulse", "==", json[0].pulse)
+        .where("messageType", "==", json[0].messageType)
         .where("obsoletedFlag", "==", "n")
     ;
     const snapshot = await query.get();
@@ -423,7 +437,9 @@ exports.SignalHelper = class SignalHelper {
       exchange: _.first(json).exchange,
       symbol: _.first(json).symbol,
       interval: _.first(json).interval,
-      pulse: _.first(json).pulse,
+      side: _.first(json).side,
+      messageType: _.first(json).messageType,
+      group: _.first(json).group,
     };
   }
 
@@ -446,5 +462,30 @@ exports.SignalHelper = class SignalHelper {
     });
 
     return _.first(json);
+  }
+
+  static async getProposalBySymbol(symbol, side, entryPrice,exchange="binance") {
+
+    const db = getDB();
+    const collection = db.collection(PROPOSALS_COLLECTION);
+
+    // Find collection by symbol and update readTime.
+    const query = collection
+        .where("symbol", "==", symbol)
+        .where("side", "==", side)
+        .where("entry", "==", entryPrice)
+        .where("messageType", "==", "signal")
+        .where("group", "==", "BUYSELL")
+    ;
+    const snapshot = await query.get();
+    const readRecs = snapshot.docs.map((doc) => {
+      const docData = doc.data();
+      // Store doc ID in docData.
+      docData.id = doc.id;
+      return docData;
+    });
+
+    // Return latest data by time.
+    return _.first(_.orderBy(readRecs, ["time"], ["desc"]));
   }
 };

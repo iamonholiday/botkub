@@ -1,6 +1,6 @@
 const {OrderManager} = require("./orders/order-helper");
-const line = require("@line/bot-sdk");
-const _ = require("lodash");
+// const line = require("@line/bot-sdk");
+// const _ = require("lodash");
 const {CommonHelper} = require("./helpers/common-helper");
 const {ProposalManager} = require("./proposals");
 
@@ -43,28 +43,30 @@ const sanitizedData = (data) => {
 };
 
 const pushMessageToLine = async (text, type = "text") => {
-  // Store line token.
-  const {env} = process;
-  const {LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_ID} = env;
-  // LINE_CHANNEL_ACCESS_SECRET
-
-  const client = new line.Client({
-    channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
-    // channelSecret: LINE_CHANNEL_ACCESS_SECRET,
-  });
-
-  const message = {
-    type,
-    text,
-  };
-
-  let pushResult;
-  try {
-    pushResult = await client.pushMessage(LINE_CHANNEL_ID, message);
-  } catch (e) {
-    console.log(e);
-  }
-  return pushResult;
+  return true;
+  //
+  // // Store line token.
+  // const {env} = process;
+  // const {LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_ID} = env;
+  // // LINE_CHANNEL_ACCESS_SECRET
+  //
+  // const client = new line.Client({
+  //   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
+  //   // channelSecret: LINE_CHANNEL_ACCESS_SECRET,
+  // });
+  //
+  // const message = {
+  //   type,
+  //   text,
+  // };
+  //
+  // let pushResult;
+  // try {
+  //   pushResult = await client.pushMessage(LINE_CHANNEL_ID, message);
+  // } catch (e) {
+  //   console.log(e);
+  // }
+  // return pushResult;
 };
 
 exports.cleanData = functions.https.onRequest(async (req, res) => {
@@ -96,15 +98,11 @@ exports.generateToken = functions.https.onRequest(async (req, res) => {
 });
 
 exports.updateByData = functions.https.onRequest(async (req, res) => {
-  pushMessageToLine("ake test").then(() => {});
+  // pushMessageToLine("ake test").then(() => {});
 
-  return {
-    message: "oke",
-
-  };
   // eslint-disable-next-line no-unreachable
   const hash = getEnvironmentToken();
-  const token = _.last(req.body.split("|"));
+  const {token} = req.query;
   let message;
 
   if (hash !== token) {
@@ -118,27 +116,29 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
   let ret = {};
 
   if (dataType === "signal") {
+    // ============================
+    // ========== Signal ==========
+    // ============================
     const {
       exchange,
       symbol,
       interval,
-      signal,
+      messageType,
       side,
     } = await SignalHelper.signalHandler(text);
     ret = {message: "Signal has been updated successfully."};
 
-    const recSignal = await SignalHelper.readSignal(exchange, symbol, interval, signal, side);
+    const recSignal = await SignalHelper.readSignal(exchange, symbol, interval, messageType, side);
     if (!recSignal) {
       return res.status(404).send({
         error: "Signal not meet criteria.",
       });
     }
 
-    const recPulses = await SignalHelper.readPulse(exchange, symbol, interval);
     const toProposal = {
       signal: recSignal,
       pulse: null,
-      pulses: recPulses,
+      pulses: [],
     };
 
     // Spawn proposals.
@@ -148,28 +148,32 @@ exports.updateByData = functions.https.onRequest(async (req, res) => {
         });
     // eslint-disable-next-line no-unreachable
   } else if (dataType === "pulse") {
+    // ============================
+    // ========== Pulses ==========
+    // ============================
+
     const {
       exchange,
       symbol,
       interval,
-      pulse,
+      group,
     } = await SignalHelper.pulseHandler(text);
     ret ={message: "Pulse has been successfully."};
 
-    const returnedRecs = await SignalHelper.readPulse(exchange, symbol, interval, pulse);
-    const triggerPulse = returnedRecs.find((iPulse) => iPulse.pulse === pulse);
+    const returnedRecs = await SignalHelper.readPulse(exchange, symbol, interval, group);
+    const triggerPulse = returnedRecs.find((iPulse) => iPulse.group === group);
     const toProposal = {
       signal: null,
       pulse: triggerPulse,
       pulses: returnedRecs,
     };
 
-    const ALLOW_PULSE_PROPOSAL_LIST = ["STOP LOSS", "CCI200"];
-    if (ALLOW_PULSE_PROPOSAL_LIST.includes(pulse)) {
+    const ALLOW_PULSE_PROPOSAL_LIST = ["STOP LOSS", "TAKE PROFIT LIST"];
+    if (ALLOW_PULSE_PROPOSAL_LIST.includes(group)) {
       // Store message as proposal is being executed.
       message = [
         `Proposal of ${symbol} is being executed.`,
-        `- Pulse: ${pulse}`,
+        `- Group: ${group}`,
         `- Exchange: ${exchange}`,
         `- Interval: ${interval}`,
         `- Time: ${new Date().toLocaleString()}`,
@@ -223,13 +227,18 @@ exports.exeProposal = functions.https.onRequest(async (req, res) => {
   }
 
   const {signal, pulse, pulses} = req.body;
-  const signalRFQ = signal ? ProposalManager.createSignalRFQ(signal) : null;
-  const pulseRFQ = pulse ? ProposalManager.createPulseRFQ(pulse) : null;
+  const signalRFQ = signal ? await ProposalManager.createSignalRFQ(signal) : null;
+  const pulseRFQ = pulse ? await ProposalManager.createPulseRFQ(pulse) : null;
   const listOfPulseRFQ = pulses.map((iPulse) => ProposalManager.createPulseRFQ(iPulse));
   const proposal = new ProposalManager(signalRFQ, pulseRFQ, ...listOfPulseRFQ);
 
+  // LIMIT / MARKET / BEST_MARKET
+  const purchaseOptions = {
+    orderOption: "LIMIT",
+  };
+
   try {
-    await proposal.preparePurchaseOrder();
+    await proposal.preparePurchaseOrder(purchaseOptions);
     await proposal.execute();
 
     const executedMessage = [
@@ -246,7 +255,7 @@ exports.exeProposal = functions.https.onRequest(async (req, res) => {
       message: "Proposal has been executed successfully.",
     });
   } catch (err) {
-  // Log error.
+    // Log error.
     functions.logger.info("error", "error", err);
     return res.status(500).send({
       error: err,

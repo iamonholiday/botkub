@@ -14,7 +14,6 @@
  */
 require("dotenv").config();
 const Binance = require("node-binance-api");
-const {CommonHelper} = require("../helpers/common-helper");
 
 const MAX_SYMBOL_NUMBERS = 12;
 const MIN_LEVERAGE = 1;
@@ -315,53 +314,6 @@ exports.OrderManager = class OrderManager {
   }
 
   /**
-     *
-     * @param {string} symbol - The ticker to get the ticker for.
-     * @param {{orderId: string, status: 'FILLED' | 'NEW' | 'CANCELED' | 'REJECTED' | 'EXPIRED'}} ordered - The id of the order to cancel.
-     * @return {Promise<*>}
-     */
-  async waitForOrder(symbol, ordered) {
-    let attempt = 10;
-    let order;
-
-    do {
-      // Timeout for 1 seconds.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      order = await this.binance.futuresOrderStatus(symbol, {
-        orderId: ordered.orderId,
-      });
-      attempt--;
-    } while (order.status !== ordered.status && attempt > 0);
-
-    if (order.status !== ordered.status) {
-      return {
-        error: `Order ${ordered.orderId} not ${ordered.status}`,
-      };
-    }
-
-    return {
-      result: order,
-    };
-  }
-
-  /**
-   * @param {string} symbol -> The ticker to get the ticker for.
-   * @return {Promise<any>}
-   */
-  async getOrder(symbol) {
-    return await this.binance.futuresAllOrders();
-  }
-
-  /**
-   * @param {string} symbol - The ticker to get the ticker for.
-   * @return {Promise<any>}
-   */
-  async getOrderStatus(symbol) {
-    const resp = await this.binance.futuresAggTrades(symbol);
-    return resp;
-  }
-
-  /**
      * @param {...string} symbols - The symbols to get the list of orders.
      * @return {Promise<*>} - List of orders.
      * example [{
@@ -414,44 +366,6 @@ exports.OrderManager = class OrderManager {
 
     // Flatten array.
     const flattened = orderHistory.reduce((acc, curr) => acc.concat(curr), []);
-    return flattened;
-  }
-
-
-  /**
-     * @param {string} symbols - The symbol to get the list of orders.
-     * @return {Promise<*>}
-     * example [{
-     "symbol": "ETHUSDT",
-     "id": 97195629,
-     "orderId": 928253802,
-     "side": "SELL",
-     "price": "1695",
-     "qty": "0.200",
-     "realizedPnl": "0",
-     "marginAsset": "USDT",
-     "quoteQty": "339",
-     "commission": "0.13560000",
-     "commissionAsset": "USDT",
-     "time": 1660922720082,
-     "positionSide": "BOTH",
-     "maker": false,
-     "buyer": false
-     }]
-     */
-  async getTradeHistory(...symbols) {
-    // Raise error if symbols more than 10.
-    if (symbols.length > MAX_SYMBOL_NUMBERS) {
-      throw new Error(`Maximum of ${MAX_SYMBOL_NUMBERS} symbols allowed`);
-    }
-
-    // Loop async call.
-    const tradeHistory = await Promise.all(symbols.map(async (iSymbol) => {
-      return await this.binance.futuresUserTrades(iSymbol);
-    }));
-
-    // Flatten array.
-    const flattened = tradeHistory.reduce((acc, curr) => acc.concat(curr), []);
     return flattened;
   }
 
@@ -509,31 +423,29 @@ exports.OrderManager = class OrderManager {
   async placeStopLoss(orderProposal, options) {
     const symbol = sanitizeSymbol(orderProposal.symbol);
     const {
-      buyStopLoss,
-      sellStopLoss,
-      qty,
-      mark: entryPrice,
+      roundedSlQty,
+      side,
+      roundedSlPrice,
+      roundedMark,
     } = orderProposal;
 
     const type = "STOP";
-    const quantity = qty;
+
 
     // If buyStopLoss is true, then use futuresSell.
     // Otherwise, use futuresBuy.
-    const action = buyStopLoss ?
+    const action = side === "buy" ?
         this.binance.futuresSell :
         this.binance.futuresBuy;
-
-    const stopLoss = buyStopLoss ? buyStopLoss : sellStopLoss;
 
     let res;
     try {
       res = await action(
           symbol,
-          Math.abs(quantity),
-          entryPrice,
+          roundedSlQty,
+          roundedSlPrice,
           {
-            stopPrice: CommonHelper.toPriceNumber(stopLoss, 2),
+            stopPrice: roundedMark,
             type: type,
             workingType: "MARK_PRICE",
           },
@@ -541,65 +453,105 @@ exports.OrderManager = class OrderManager {
     } catch (error) {
       return {
         error: error,
+        result: null,
+        data: null,
       };
     }
 
     return {
       result: res,
+      error: null,
+      data: null,
     };
   }
 
   async placeTakeProfit(orderProposal, options) {
     const symbol = sanitizeSymbol(orderProposal.symbol);
     const {
-      tpBuy: buyTakeProfit,
-      tpSell: sellTakeProfit,
-      qty,
+      side, roundedMark,
     } = orderProposal;
 
-    const type = "TAKE_PROFIT";
-    const quantity = qty;
 
-    // If buyTakeProfit is true, then use futuresSell.
-    // Otherwise, use futuresBuy.
-    let action;
-    let price;
+    const results = [];
 
-    if (!(buyTakeProfit ^ sellTakeProfit)) {
-      return {
-        error: "Invalid take profit order proposal",
-      };
-    } else if (buyTakeProfit) {
-      action = this.binance.futuresSell;
-      price = CommonHelper.toPriceNumber(buyTakeProfit);
-    } else {
-      action = this.binance.futuresBuy;
-      price = CommonHelper.toPriceNumber(sellTakeProfit);
-    }
+    // Loop inc from 0 to 9.
+    for (let i = 0; i < 9; i++) {
 
-    const takeProfit = buyTakeProfit ? buyTakeProfit : sellTakeProfit;
+      // Skip if takeProfit is not set.
+      if (orderProposal[`roundedTpQty${i}`] === 0) {
+        continue;
+      }
 
-    let res;
-    try {
-      res = await action(
-          symbol,
-          Math.abs(quantity),
-          price,
-          {
-            stopPrice: CommonHelper.toPriceNumber(takeProfit, 2),
-            type: type,
-            workingType: "CONTRACT_PRICE",
+      const buyTakeProfit = side === "buy" ? orderProposal[`roundedTpPrice${i}`] : null;
+      const sellTakeProfit = side === "sell" ? orderProposal[`roundedTpPrice${i}`] : null;
+
+
+      const type = "TAKE_PROFIT";
+
+      // If buyTakeProfit is true, then use futuresSell.
+      // Otherwise, use futuresBuy.
+      let action;
+      let price;
+
+      if (!(buyTakeProfit ^ sellTakeProfit)) {
+        return {
+          error: "Invalid take profit order proposal",
+        };
+      } else if (buyTakeProfit) {
+        action = this.binance.futuresSell;
+        price = roundedMark;
+      } else {
+        action = this.binance.futuresBuy;
+        price = roundedMark;
+      }
+
+      const roundedTakeProfit = buyTakeProfit ? buyTakeProfit : sellTakeProfit;
+      const roundedQty = orderProposal[`roundedTpQty${i}`];
+
+      let res;
+      try {
+        res = await action(
+            symbol,
+            roundedQty,
+            roundedTakeProfit,
+            {
+              stopPrice: price,
+              type: type,
+              workingType: "CONTRACT_PRICE",
+            },
+        );
+      } catch (error) {
+        return {
+          error: error,
+          result: null,
+          data: {
+            action: "TAKE_PROFIT",
+            value: {
+              symbol,
+              roundedQty,
+              roundedTakeProfit,
+            },
           },
-      );
-    } catch (error) {
-      return {
-        error: error,
-      };
+        };
+      }
+
+
+      if (!res.orderId) {
+        results.push({
+          error: res,
+          result: null,
+          data: null,
+        });
+      } else {
+        results.push({
+          result: res,
+          error: null,
+          data: null,
+        });
+      }
     }
 
-    return {
-      result: res,
-    };
+    return results;
   }
 
   async sanitizeOrder(orderProposal) {
@@ -810,6 +762,43 @@ exports.OrderManager = class OrderManager {
       symbol,
 
     };
+  }
+
+  async roundQty(price, amountQty, symbolInfo) {
+    const {filters} = symbolInfo;
+    const filter = filters.find((iFilter) => iFilter.filterType === "LOT_SIZE");
+    const {stepSize} = filter;
+
+    const {minQty, minNotional}= symbolInfo;
+
+    // Set minimum order amount with minQty
+    if ( amountQty < minQty ) amountQty = minQty;
+
+    // Set minimum order amount with minNotional
+    if ( price * amountQty < minNotional ) {
+      amountQty = minNotional / price;
+    }
+
+    // Round to stepSize
+    amountQty = this.binance.roundStep(amountQty, stepSize);
+    return amountQty;
+  }
+
+  async roundPrice(price, symbolInfo) {
+    const {filters} = symbolInfo;
+    const filter = filters.find((iFilter) => iFilter.filterType === "PRICE_FILTER");
+    const {tickSize} = filter;
+    price = this.binance.roundStep(price, tickSize);
+    return price;
+  }
+
+  async getSymbolInfo(symbol) {
+    const exchangeInstance = OrderManager.getExchangeInstance();
+    const exchangeInfo = await exchangeInstance.futuresExchangeInfo();
+    const {symbols} = exchangeInfo;
+    const symbolInfo = symbols.find((iSymbol) => iSymbol.symbol === symbol);
+
+    return symbolInfo;
   }
 };
 
