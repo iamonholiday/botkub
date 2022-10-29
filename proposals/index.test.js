@@ -3,6 +3,7 @@ const {expect} = require("chai");
 // const sinon = require("sinon");
 // const {step, xstep} = require("mocha-steps");
 const {createSignalRFQ, createPulseRFQ, ProposalManager} = require("./index");
+const functions = require("firebase-functions");
 
 const EXPIRED_LENGTH = 1 * 60 * 1000;
 // Store current time as string.
@@ -307,7 +308,7 @@ describe("Test proposal.", async () => {
       // Expect this.hasExecuted = true;
       expect(pmgr.hasExecuted).to.equal(true);
     } catch (err) {
-      console.log(err);
+      functions.logger.error(err);
 
       // Expect no error.
       expect(err).to.equal(null);

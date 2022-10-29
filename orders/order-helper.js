@@ -13,7 +13,9 @@
  * @property {string} orderId - Order id.
  */
 require("dotenv").config();
+// const _ = require("lodash");
 const Binance = require("node-binance-api");
+const functions = require("firebase-functions");
 
 const MAX_SYMBOL_NUMBERS = 12;
 const MIN_LEVERAGE = 1;
@@ -205,8 +207,13 @@ exports.OrderManager = class OrderManager {
 
     try {
       balances = await this.binance.futuresBalance();
+
+      // Raise error if balance is null.
+      if (balances === null) {
+        throw new Error("Balance is null");
+      }
     } catch (error) {
-      console.log(error);
+      functions.logger.info(error);
     }
 
     const filtered = assetNames.length > 0 ?
@@ -313,6 +320,20 @@ exports.OrderManager = class OrderManager {
     return flattened;
   }
 
+  async getOpenOrdersArray(...symbols) {
+    // Raise error if symbols more than MAX_SYMBOL_NUMBERS.
+    if (symbols.length > MAX_SYMBOL_NUMBERS) {
+      throw new Error(`Maximum of ${MAX_SYMBOL_NUMBERS} symbols allowed`);
+    }
+
+    // Loop async call.
+    const openOrders = await Promise.all(symbols.map(async (iSymbol) => {
+      return await this.binance.futuresOpenOrders(sanitizeSymbol(iSymbol));
+    }));
+
+    return openOrders[0];
+  }
+
   /**
      * @param {...string} symbols - The symbols to get the list of orders.
      * @return {Promise<*>} - List of orders.
@@ -382,7 +403,9 @@ exports.OrderManager = class OrderManager {
 
     const result = options ?
             await this.binance.futuresBuy(symbol, data.qty, data.price, options) :
-            await this.binance.futuresBuy(symbol, data.qty, data.price);
+            await this.binance.futuresBuy(symbol, data.qty, data.price, {
+              "timeInForce": "GTC",
+            });
 
     if (!result.orderId) {
       error = result;
@@ -407,7 +430,9 @@ exports.OrderManager = class OrderManager {
     const symbol = sanitizeSymbol(data.symbol);
     const result = options ?
             await this.binance.futuresSell(symbol, data.qty, data.price, options) :
-            await this.binance.futuresSell(symbol, data.qty, data.price);
+            await this.binance.futuresSell(symbol, data.qty, data.price, {
+              "timeInForce": "GTC",
+            });
 
     if (!result.orderId) {
       error = result;
@@ -420,6 +445,81 @@ exports.OrderManager = class OrderManager {
     };
   }
 
+  async buyMarket(orderProposal, options) {
+    let error;
+    let inputData;
+    const data = orderProposal;
+    const symbol = sanitizeSymbol(data.symbol);
+
+    // eslint-disable-next-line prefer-const
+    inputData = {
+      orderType: "MARKET",
+      options: {
+        symbol,
+        qty: data.qty,
+        ...{
+          // "timeInForce": "GTC",
+          "reduceOnly": false,
+        },
+      },
+    };
+
+    const result = options ?
+            await this.binance.futuresMarketBuy(symbol, data.qty, options) :
+            await this.binance.futuresMarketBuy(symbol, data.qty, {
+              // "timeInForce": "GTC",
+              "reduceOnly": false,
+            });
+
+    if (!result.orderId) {
+      error = result;
+    }
+
+    return {
+      result,
+      error,
+      data: inputData,
+    };
+  }
+
+  async sellMarket(orderProposal, options) {
+    let error;
+    let inputData;
+    const data = orderProposal;
+    const symbol = sanitizeSymbol(data.symbol);
+
+    // eslint-disable-next-line prefer-const
+    inputData = {
+      orderType: "MARKET",
+      options: {
+        symbol,
+        qty: data.qty,
+        ...{
+          // "timeInForce": "GTC",
+          "reduceOnly": false,
+        },
+      },
+    };
+
+    const result = options ?
+            await this.binance.futuresMarketSell(symbol, data.qty, options) :
+            await this.binance.futuresMarketSell(symbol, data.qty, {
+              // "timeInForce": "GTC",
+              "reduceOnly": false,
+            });
+
+    if (!result.orderId) {
+      error = result;
+    }
+
+    return {
+      result,
+      error,
+      data: inputData,
+    };
+  }
+
+
   async placeStopLoss(orderProposal, options) {
     const symbol = sanitizeSymbol(orderProposal.symbol);
     const {
@@ -429,8 +529,16 @@ exports.OrderManager = class OrderManager {
       roundedMark,
     } = orderProposal;
 
-    const type = "STOP";
+    const type = "STOP_MARKET";
+    let inputData;
 
+    // Cancel all open STOP_LOSS orders.
+    const opens = await this.getOpenOrdersArray(symbol);
+    for (const open of opens) {
+      if (open.type.indexOf("STOP") > -1) {
+        await this.cancelOrder(symbol, open.orderId);
+      }
+    }
 
     // If buyStopLoss is true, then use futuresSell.
     // Otherwise, use futuresBuy.
@@ -440,43 +548,75 @@ exports.OrderManager = class OrderManager {
 
     let res;
     try {
-      res = await action(
-          symbol,
+      // Log the order proposal.
+      functions.logger.info("placeStopLoss", {
+        symbol,
+        roundedSlQty,
+        roundedSlPrice,
+        ...{
+          stopPrice: roundedMark,
+          type: type,
+          workingType: "MARK_PRICE",
+        },
+      });
+      inputData = {
+        orderType: "STOP_LOSS",
+        symbol,
+        roundedSlQty,
+        ...{
+          stopPrice: roundedMark,
+          type: type,
+          workingType: "MARK_PRICE",
+          closePosition: true,
+          // timeInForce: "GTC",
+        // reduceOnly: false,
+        },
+      };
+      res = await action(symbol,
           roundedSlQty,
-          roundedSlPrice,
+          null, // roundedSlPrice,
           {
             stopPrice: roundedMark,
             type: type,
             workingType: "MARK_PRICE",
+            closePosition: true,
+            timeInForce: "GTC",
+            // reduceOnly: false,
           },
       );
     } catch (error) {
       return {
         error: error,
         result: null,
-        data: null,
+        data: inputData,
       };
     }
 
     return {
       result: res,
       error: null,
-      data: null,
+      data: inputData,
     };
   }
 
   async placeTakeProfit(orderProposal, options) {
     const symbol = sanitizeSymbol(orderProposal.symbol);
     const {
-      side, roundedMark,
+      side, roundedSlPrice,
     } = orderProposal;
 
+    // Cancel all open TAKE_PROFIT orders.
+    const opens = await this.getOpenOrdersArray(symbol);
+    for (const open of opens) {
+      if (open.type.indexOf("TAKE_PROFIT") > -1) {
+        await this.cancelOrder(symbol, open.orderId);
+      }
+    }
 
     const results = [];
 
     // Loop inc from 0 to 9.
     for (let i = 0; i < 9; i++) {
-
       // Skip if takeProfit is not set.
       if (orderProposal[`roundedTpQty${i}`] === 0) {
         continue;
@@ -488,10 +628,17 @@ exports.OrderManager = class OrderManager {
 
       const type = "TAKE_PROFIT";
 
-      // If buyTakeProfit is true, then use futuresSell.
-      // Otherwise, use futuresBuy.
+      // If buyTakeProfit is true, then use futuresSell otherwise, use futuresBuy.
       let action;
-      let price;
+      let stopPrice;
+      let inputData;
+
+      if (i === 0) {
+        stopPrice = roundedSlPrice;
+      } else {
+        stopPrice = orderProposal[`roundedTpPrice${i - 1}`];
+      }
+
 
       if (!(buyTakeProfit ^ sellTakeProfit)) {
         return {
@@ -499,10 +646,15 @@ exports.OrderManager = class OrderManager {
         };
       } else if (buyTakeProfit) {
         action = this.binance.futuresSell;
-        price = roundedMark;
+
+
+        // eslint-disable-next-line prefer-destructuring
+        stopPrice = roundedSlPrice;
       } else {
         action = this.binance.futuresBuy;
-        price = roundedMark;
+
+        // eslint-disable-next-line prefer-destructuring
+        stopPrice = roundedSlPrice;
       }
 
       const roundedTakeProfit = buyTakeProfit ? buyTakeProfit : sellTakeProfit;
@@ -510,28 +662,39 @@ exports.OrderManager = class OrderManager {
 
       let res;
       try {
+        // Log the order proposal.
+        inputData = {
+          orderType: "TAKE_PROFIT",
+          symbol,
+          roundedQty,
+          roundedTakeProfit,
+          ...{
+            stopPrice: stopPrice,
+            type: type,
+            workingType: "MARK_PRICE", // "CONTRACT_PRICE",
+            timeInForce: "GTC",
+            reduceOnly: false,
+          },
+        };
+
+
         res = await action(
             symbol,
             roundedQty,
             roundedTakeProfit,
             {
-              stopPrice: price,
+              stopPrice: stopPrice,
               type: type,
-              workingType: "CONTRACT_PRICE",
+              workingType: "MARK_PRICE", // "CONTRACT_PRICE",
+              timeInForce: "GTC",
+              reduceOnly: false,
             },
         );
       } catch (error) {
         return {
           error: error,
           result: null,
-          data: {
-            action: "TAKE_PROFIT",
-            value: {
-              symbol,
-              roundedQty,
-              roundedTakeProfit,
-            },
-          },
+          data: inputData,
         };
       }
 
@@ -540,13 +703,13 @@ exports.OrderManager = class OrderManager {
         results.push({
           error: res,
           result: null,
-          data: null,
+          data: inputData,
         });
       } else {
         results.push({
           result: res,
           error: null,
-          data: null,
+          data: inputData,
         });
       }
     }
@@ -568,7 +731,7 @@ exports.OrderManager = class OrderManager {
       // For loop to cancel all orders.
       for (const iOrder of listOfOrders) {
         // Log the order.
-        console.log(iOrder);
+        functions.logger.info(iOrder);
 
         const {result: cancelResult} = await this.cancelOrder(
             sanitizeSymbol(symbol),
@@ -584,7 +747,7 @@ exports.OrderManager = class OrderManager {
       // For loop to cancel all orders.
       for (const iOrder of listOfOrders) {
         // Log the order.
-        console.log(iOrder);
+        functions.logger.info(iOrder);
 
         const {result: cancelResult} = await this.cancelOrder(
             sanitizeSymbol(symbol),
@@ -598,7 +761,7 @@ exports.OrderManager = class OrderManager {
       // For loop to cancel all orders.
       for (const iOrder of listOfOrders) {
         // Log the order.
-        console.log(iOrder);
+        functions.logger.info(iOrder);
 
         const {result: cancelResult} = await this.cancelOrder(sanitizeSymbol(symbol),
             iOrder.orderId);
@@ -622,7 +785,7 @@ exports.OrderManager = class OrderManager {
       resp = await this.binance.futuresQuote(symbolPerp);
     } catch (err) {
       // Log error.
-      console.log(err);
+      functions.logger.info(err);
     }
     return resp;
   }
@@ -799,6 +962,29 @@ exports.OrderManager = class OrderManager {
     const symbolInfo = symbols.find((iSymbol) => iSymbol.symbol === symbol);
 
     return symbolInfo;
+  }
+
+  async closePosition(symbol) {
+    const resp = await this.binance.futuresPositionRisk({
+      symbol: symbol,
+    });
+    // eslint-disable-next-line prefer-destructuring
+    const {positionAmt} = resp[0];
+    const amountQty = Math.abs(positionAmt);
+
+    let respClosePosition;
+    if (amountQty === 0) {
+      return {
+        result: "No position to close",
+      };
+    } else if (amountQty > 0) {
+      respClosePosition = await this.binance.futuresMarketSell(symbol, amountQty);
+    } else {
+      respClosePosition = await this.binance.futuresMarketBuy(symbol, amountQty);
+    }
+    return {
+      result: respClosePosition,
+    };
   }
 };
 

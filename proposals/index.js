@@ -4,7 +4,9 @@ const serviceAccount = require("../serviceAccount.json");
 const {CommonHelper} = require("../helpers/common-helper");
 const {logger} = require("firebase-functions");
 const {SignalHelper} = require("../helpers/signal-helper");
-// const _ = require("lodash");
+const functions = require("firebase-functions");
+
+const ENABLED_EXPIRED = false;
 
 const initApp = () => {
   // Check if the app is initialized.
@@ -16,18 +18,14 @@ const initApp = () => {
   }
 };
 
-const STAKE_PERCENTAGE = .1;
-
-const ASSET = "USDT";
-
 // strikePriceOption
 // LIMIT / MARKET / BEST_LIMIT / BEST_MARKET
 
 exports.ProposalManager = class ProposalManager {
   static async createSignalRFQ(data,
-                               signalOptions = {strikePriceOption: "entry"},
-                               purchaseOptions = {orderOption : "MARKET"}
-                               ) {
+      signalOptions = {strikePriceOption: "entry"},
+      purchaseOptions = {orderOption: "MARKET"},
+  ) {
     // Make sure "signal.time" and "signal.expiry" are Date object.
     const time = typeof data.time !== "object" ? new Date(data.time) : data.time;
     const expiry = typeof data.expiry !== "object" ? new Date(data.expiry) : data.expiry;
@@ -42,6 +40,7 @@ exports.ProposalManager = class ProposalManager {
       mark,
       sl,
       exchange,
+      leverage,
     } = data;
 
     const asset = "USDT";
@@ -91,10 +90,33 @@ exports.ProposalManager = class ProposalManager {
 
     const riskExposureValue = balance * riskExposurePercentage;
     const positionSize = riskExposureValue / Math.abs(price - sl);
+    // const positionSize = Math.abs(price - sl);
 
     const roundedPrice = await orm.roundPrice(price, symbolInfo);
     const roundedQty = await orm.roundQty(price, positionSize, symbolInfo);
     const roundedSlQty = roundedQty;
+
+    // Check information.
+    const order = new OrderManager(exchange);
+    const acc = await order.getAccount();
+    const {totalMarginBalance} = acc;
+
+    let adjLeverage = leverage;
+    const margin = totalMarginBalance;
+    let marginNeeded;
+    while (adjLeverage > 1) {
+      // Make sure margin is enough for order.
+      marginNeeded = roundedQty * roundedEntry * adjLeverage;
+      if (marginNeeded > margin) {
+        adjLeverage--;
+      }
+    }
+
+    const setLeverageResult = await ProposalManager.setLeverage(true, true, adjLeverage, exchange, sanitizedSymbol);
+    if (!setLeverageResult) {
+      throw new Error("Cannot set leverage.");
+    }
+
 
     const [
       roundedTpPrice0,
@@ -148,6 +170,8 @@ exports.ProposalManager = class ProposalManager {
       expiry,
       exchange,
       sl,
+      leverage,
+      adjLeverage,
       tp0: CommonHelper.toPriceNumber(data.tp0, 4),
       tp1: CommonHelper.toPriceNumber(data.tp1, 4),
       tp2: CommonHelper.toPriceNumber(data.tp2, 4),
@@ -192,12 +216,15 @@ exports.ProposalManager = class ProposalManager {
       roundedTpQty9,
 
 
-
     };
     return retObject;
   }
 
   static async createPulseRFQ(rawData) {
+    // log the raw data.
+    functions.logger.info("createPulseRFQ", rawData);
+
+
     // Make sure "signal.time" and "signal.expiry" are Date object.
     const time = typeof rawData.time !== "object" ? new Date(rawData.time) : rawData.time;
     const expiry = typeof rawData.expiry !== "object" ? new Date(rawData.expiry) : rawData.expiry;
@@ -218,13 +245,14 @@ exports.ProposalManager = class ProposalManager {
     const requestType = "pulse";
 
     const orm = new OrderManager();
-    const prop = new ProposalManager(null,null,null);
+    const prop = new ProposalManager(null, null, null);
     const sanitizedSymbol = prop.sanitizeSymbolByRemovePERP(symbol);
     const symbolInfo = await orm.getSymbolInfo(sanitizedSymbol);
-    const signalProposal = await SignalHelper.getProposalBySymbol(sanitizedSymbol,side,
-        CommonHelper.toPriceNumber(entry)
-        );
-    const {orderData} = signalProposal;
+
+    // const signalProposal = await SignalHelper.getProposalBySymbol(sanitizedSymbol, swapSide,
+    //     entry,
+    // );
+    // const {orderData} = signalProposal;
 
 
     // rounded entry price.
@@ -236,42 +264,63 @@ exports.ProposalManager = class ProposalManager {
     rawData.roundedEntry = roundedEntry;
     rawData.roundedMark = roundedMark;
 
-    if (group === "TAKE PROFIT LIST"){
-        rawData.roundedTpPrice0 = ProposalManager.getAdjPrice(rawData.takeProfitList[0], symbolInfo);
-        rawData.roundedTpPrice1 = ProposalManager.getAdjPrice(rawData.takeProfitList[1], symbolInfo);
-        rawData.roundedTpPrice2 = ProposalManager.getAdjPrice(rawData.takeProfitList[2], symbolInfo);
-        rawData.roundedTpPrice3 = ProposalManager.getAdjPrice(rawData.takeProfitList[3], symbolInfo);
-        rawData.roundedTpPrice4 = ProposalManager.getAdjPrice(rawData.takeProfitList[4], symbolInfo);
-        rawData.roundedTpPrice5 = ProposalManager.getAdjPrice(rawData.takeProfitList[5], symbolInfo);
-        rawData.roundedTpPrice6 = ProposalManager.getAdjPrice(rawData.takeProfitList[6], symbolInfo);
-        rawData.roundedTpPrice7 = ProposalManager.getAdjPrice(rawData.takeProfitList[7], symbolInfo);
-        rawData.roundedTpPrice8 = ProposalManager.getAdjPrice(rawData.takeProfitList[8], symbolInfo);
-        rawData.roundedTpPrice9 = ProposalManager.getAdjPrice(rawData.takeProfitList[9], symbolInfo);
+    const positions = await orm.getPositions(sanitizedSymbol);
+    const [position] = positions;
 
-        const qty0 = await orm.roundQty(rawData.roundedTpPrice0, orderData.origQty * .3, symbolInfo);
-        const qty1 = await orm.roundQty(rawData.roundedTpPrice1, qty0 * .3, symbolInfo);
-        const qty2 = await orm.roundQty(rawData.roundedTpPrice2, qty1 * .3, symbolInfo);
-        const qty3 = await orm.roundQty(rawData.roundedTpPrice3, qty2 * .3, symbolInfo);
-        const qty4 = await orm.roundQty(rawData.roundedTpPrice4, qty3 * .3, symbolInfo);
-        const qty5 = await orm.roundQty(rawData.roundedTpPrice5, qty4 * .3, symbolInfo);
-        const qty6 = await orm.roundQty(rawData.roundedTpPrice6, qty5 * .3, symbolInfo);
-        const qty7 = await orm.roundQty(rawData.roundedTpPrice7, qty6 * .3, symbolInfo);
-        const qty8 = await orm.roundQty(rawData.roundedTpPrice8, qty7 * .3, symbolInfo);
-        const qty9 = await orm.roundQty(rawData.roundedTpPrice9, qty8 * .3, symbolInfo);
+    // const openOrders = await orm.getOpenOrders(sanitizedSymbol);
+    // const [openOrder] = openOrders;
 
-        rawData.roundedTpQty0 = qty0;
-        rawData.roundedTpQty1 = qty1;
-        rawData.roundedTpQty2 = qty2;
-        rawData.roundedTpQty3 = qty3;
-        rawData.roundedTpQty4 = qty4;
-        rawData.roundedTpQty5 = qty5;
-        rawData.roundedTpQty6 = qty6;
-        rawData.roundedTpQty7 = qty7;
-        rawData.roundedTpQty8 = qty8;
-        rawData.roundedTpQty9 = qty9;
-    } else if (group === "STOP LOSS"){
-        rawData.roundedSlPrice = ProposalManager.getAdjPrice(rawData.sl, symbolInfo);
-        rawData.roundedSlQty = ProposalManager.getAdjQty(rawData.roundedSl,orderData.origQty, symbolInfo);
+    let currentQty = position ? position?.positionAmt : 0;
+    currentQty = Math.abs(currentQty);
+
+
+    if (currentQty === 0) {
+      // const swapSide = side === "buy" ? "sell" : "buy";
+      const signalProposal = await SignalHelper.getProposalBySymbol(
+          sanitizedSymbol,
+          side,
+          entry,
+      );
+      currentQty = signalProposal?.orderData?.origQty;
+    }
+
+
+    if (group === "TAKE PROFIT LIST") {
+      rawData.roundedTpPrice0 = ProposalManager.getAdjPrice(rawData.takeProfitList[0], symbolInfo);
+      rawData.roundedTpPrice1 = ProposalManager.getAdjPrice(rawData.takeProfitList[1], symbolInfo);
+      rawData.roundedTpPrice2 = ProposalManager.getAdjPrice(rawData.takeProfitList[2], symbolInfo);
+      rawData.roundedTpPrice3 = ProposalManager.getAdjPrice(rawData.takeProfitList[3], symbolInfo);
+      rawData.roundedTpPrice4 = ProposalManager.getAdjPrice(rawData.takeProfitList[4], symbolInfo);
+      rawData.roundedTpPrice5 = ProposalManager.getAdjPrice(rawData.takeProfitList[5], symbolInfo);
+      rawData.roundedTpPrice6 = ProposalManager.getAdjPrice(rawData.takeProfitList[6], symbolInfo);
+      rawData.roundedTpPrice7 = ProposalManager.getAdjPrice(rawData.takeProfitList[7], symbolInfo);
+      rawData.roundedTpPrice8 = ProposalManager.getAdjPrice(rawData.takeProfitList[8], symbolInfo);
+      rawData.roundedTpPrice9 = ProposalManager.getAdjPrice(rawData.takeProfitList[9], symbolInfo);
+
+      const qty0 = await orm.roundQty(rawData.roundedTpPrice0, currentQty * .3, symbolInfo);
+      const qty1 = await orm.roundQty(rawData.roundedTpPrice1, qty0 * .3, symbolInfo);
+      const qty2 = await orm.roundQty(rawData.roundedTpPrice2, qty1 * .3, symbolInfo);
+      const qty3 = await orm.roundQty(rawData.roundedTpPrice3, qty2 * .3, symbolInfo);
+      const qty4 = await orm.roundQty(rawData.roundedTpPrice4, qty3 * .3, symbolInfo);
+      const qty5 = await orm.roundQty(rawData.roundedTpPrice5, qty4 * .3, symbolInfo);
+      const qty6 = await orm.roundQty(rawData.roundedTpPrice6, qty5 * .3, symbolInfo);
+      const qty7 = await orm.roundQty(rawData.roundedTpPrice7, qty6 * .3, symbolInfo);
+      const qty8 = await orm.roundQty(rawData.roundedTpPrice8, qty7 * .3, symbolInfo);
+      const qty9 = await orm.roundQty(rawData.roundedTpPrice9, qty8 * .3, symbolInfo);
+
+      rawData.roundedTpQty0 = qty0;
+      rawData.roundedTpQty1 = qty1;
+      rawData.roundedTpQty2 = qty2;
+      rawData.roundedTpQty3 = qty3;
+      rawData.roundedTpQty4 = qty4;
+      rawData.roundedTpQty5 = qty5;
+      rawData.roundedTpQty6 = qty6;
+      rawData.roundedTpQty7 = qty7;
+      rawData.roundedTpQty8 = qty8;
+      rawData.roundedTpQty9 = qty9;
+    } else if (group === "STOP LOSS") {
+      rawData.roundedSlPrice = ProposalManager.getAdjPrice(rawData.sl, symbolInfo);
+      rawData.roundedSlQty = currentQty;
     }
 
     const ret = {
@@ -339,14 +388,13 @@ exports.ProposalManager = class ProposalManager {
     }
 
     const {
-      expiry
+      expiry,
     } = this.signalRfq;
 
     // Raise error if expiry is less than current time.
-    if (expiry < Date.now()) {
+    if (ENABLED_EXPIRED == true && expiry < Date.now()) {
       throw new Error("Proposal is expired.");
     }
-
 
 
     // Store variable to proposal.
@@ -364,12 +412,12 @@ exports.ProposalManager = class ProposalManager {
     }
 
     const {
-      expiry
+      expiry,
     } = this.pulseRfq;
 
 
     // Raise error if expiry is less than current time.
-    if (expiry < Date.now()) {
+    if (ENABLED_EXPIRED == true && expiry < Date.now()) {
       throw new Error("Proposal is expired.");
     }
 
@@ -387,12 +435,12 @@ exports.ProposalManager = class ProposalManager {
     }
 
     const {
-      expiry
+      expiry,
     } = this.pulseRfq;
 
 
     // Raise error if expiry is less than current time.
-    if (expiry < Date.now()) {
+    if (ENABLED_EXPIRED == true && expiry < Date.now()) {
       throw new Error("Proposal is expired.");
     }
 
@@ -430,46 +478,89 @@ exports.ProposalManager = class ProposalManager {
   }
 
   async execute() {
+    let exeResult = "";
     const {proposal} = this;
-    const {messageType, group, exchange,symbol} = proposal;
-    const SETUP_ERROR = "Setup order failed";
+    const {messageType, group, symbol} = proposal;
 
     let results;
-    const order = new OrderManager(exchange);
 
-    // Sanitized order by symbol.
-    const cancelResult = await order.sanitizeOrder(proposal);
-
-    logger.info("cancelResult", cancelResult);
 
     try {
       if (group === "BUYSELL" && messageType === "signal") {
-        const setupComplete = await this.setupOrder(true, true);
-        if (!setupComplete) {
-          throw new Error(SETUP_ERROR);
-        }
-        results = await this.executeBuySell();
+        results = await this.executeBuySell(
+            false,
+            true,
+            true,
+            true,
+        );
 
-        // All iResult.orderId in results must be existed.
-        if (results.some((iResult) => !iResult.orderId)) {
-          throw new Error(SETUP_ERROR);
+        // loops each results as iResult.
+        for (const {result: iResult, error: iError} of results) {
+          // Ignore if iResult.error.code is -2021 (Order would immediately trigger.).
+          if (iResult?.code === -2021 || iError?.code === -2021) {
+            continue;
+          } else if (!iResult.orderId) {
+            throw new Error(iResult.error);
+          } else if (iError) {
+            throw new Error(iError);
+          }
         }
+
+        exeResult = "BUYSELL: success";
       } else if (["STOP LOSS"].includes(group)) {
-        const setupComplete = await this.setupOrder(false, true);
-        if (!setupComplete) {
-          throw new Error(SETUP_ERROR);
-        }
         results = await this.placeStopLoss();
-      } else if (["TAKE PROFIT LIST"].includes(group)) {
-        const setupComplete = await this.setupOrder(false, true);
-        if (!setupComplete) {
-          throw new Error(SETUP_ERROR);
+
+        // loops each results as iResult.
+        for (const {result: iResult, error: iError} of results) {
+          logger.info("SL: result", iResult);
+          logger.info("SL: error", iError);
+          // Ignore if iResult.error.code is -2021 (Order would immediately trigger.).
+          if (iResult?.code === -2021 || iError?.code === -2021) {
+            exeResult = "SL: Order would immediately trigger.";
+            break;
+          } else if (!iResult.orderId) {
+            exeResult = "SL: Order error.";
+            break;
+          } else if (iError) {
+            exeResult = "SL: Order error.";
+            break;
+          } else {
+            exeResult = "SL: Order success.";
+          }
         }
+
+        // log stop loss result.
+      } else if (["TAKE PROFIT LIST"].includes(group)) {
         results = await this.placeTakeProfit();
+
+        // loops each results as iResult.
+        for (const {result: iResult, error: iError} of results) {
+          logger.info("TP: result", iResult);
+          logger.info("TP: error", iError);
+          // Ignore if iResult.error.code is -2021 (Order would immediately trigger.).
+          if (iResult?.code === -2021 || iError?.code === -2021) {
+            exeResult = "TP: Order would immediately trigger.";
+            break;
+          } else if (!iResult.orderId) {
+            exeResult = "TP: Order error.";
+            break;
+          } else if (iError) {
+            exeResult = "TP: Order error.";
+            break;
+          } else {
+            exeResult = "TP: Order success.";
+          }
+        }
       }
+
+      // Log results.
+      functions.logger.info("execute results", results);
     } catch (err) {
       await this.executeRollback(symbol, results);
-      // await this.executeRollback(results);
+
+      // Log error.
+      functions.logger.error("SL: execute error: ", err);
+      exeResult = `SL: execute error: ${err.message}`;
     }
 
     // Mark proposal as executed.
@@ -479,29 +570,66 @@ exports.ProposalManager = class ProposalManager {
     }
 
     this.hasExecuted = true;
+    return exeResult;
   }
 
-  async executeBuySell() {
-    const limitResult =await this.placeLimit();
-    const slResult = await this.placeStopLoss();
-    const tpResult = await this.placeTakeProfit();
+  async executeBuySell(enableLimit = true,
+      enableMarket = false,
+      enableStop = true,
+      enableTakeProfit = true) {
+    // #1: Cancel all orders.
+    // #2: Place order.
+    // #3: Place stop loss.
+    // #4: Place take profit.
 
-    const results = [limitResult, slResult, tpResult].flat(5);
+    // Throws error if both enableLimit and enableMarket are true.
+    if (enableLimit && enableMarket) {
+      throw new Error("Both enableLimit and enableMarket are true.");
+    }
+
+    let limitResult;
+    let marketResult;
+    let slResult;
+    let tpResult;
+
+    if (enableLimit) {
+      limitResult = await this.placeLimit();
+    }
+    if (enableMarket) {
+      marketResult = await this.placeMarket();
+    }
+    if (enableStop) {
+      slResult = await this.placeStopLoss();
+    }
+    if (enableTakeProfit) {
+      tpResult = await this.placeTakeProfit();
+    }
+
+
+    const results = [
+      limitResult,
+      marketResult,
+      slResult,
+      tpResult,
+    ].flat(5).filter(Boolean);
+    functions.logger.info("executeBuySell results", results);
     return results;
   }
 
-  async executeRollback(symbol,results) {
+  async executeRollback(symbol, results) {
     const order = new OrderManager(this.proposal.exchange);
-    // for (const iResult of results) {
-    //   const {symbol, orderId} = iResult;
-    //   await order.cancelOrder(symbol, orderId);
-    // }
+
     // Log result.
     logger.info("executeRollback|results", results);
     const res = await order.cancelAllOrdersBySymbol(symbol);
     logger.info("executeRollback|cancelAllOrdersBySymbol", res);
   }
 
+  // async cancelAllOrdersBySymbol(symbol) {
+  //   const order = new OrderManager(this.proposal.exchange);
+  //   const res = await order.cancelAllOrdersBySymbol(symbol);
+  //   logger.info("executeRollback|cancelAllOrdersBySymbol", res);
+  // }
 
   sanitizeSymbolByRemovePERP(symbol) {
     // Remove PERP from symbol.
@@ -509,26 +637,26 @@ exports.ProposalManager = class ProposalManager {
     return sanitizedSymbol;
   }
 
-  async setupOrder(setLeverage = true, setMarginType = true) {
-    const {proposal} = this;
-    const {exchange, symbol} = proposal;
+  static async setLeverage(setLeverage = true,
+      setMarginType = true,
+      leverage = 1,
+      exchange,
+      sanitizedSymbol,
+  ) {
     const order = new OrderManager(exchange);
 
-    // Sanitized symbol.
-    const sanitizedSymbol = this.sanitizeSymbolByRemovePERP(symbol);
 
     try {
       // Set margin type to "isolated".
       const marginResult = await order.adjMarginType(sanitizedSymbol, "ISOLATED");
 
       // Set leverage.
-      const lvResult = await order.adjLeverage(sanitizedSymbol, proposal.leverage);
-      console.log("lvResult", lvResult);
-      console.log("marginResult", marginResult);
+      const lvResult = await order.adjLeverage(sanitizedSymbol, leverage);
+      functions.logger.info("lvResult", lvResult);
+      functions.logger.info("marginResult", marginResult);
     } catch (err) {
       return false;
     }
-
     return true;
   }
 
@@ -540,6 +668,16 @@ exports.ProposalManager = class ProposalManager {
     // Place order.
     const exeOrder = {symbol, qty: roundedQty, price: roundedEntry};
 
+    // Log exeOrder and side.
+    functions.logger.info("placeLimit|exeOrder", exeOrder, proposal.side);
+
+
+    // Close current position if exits.
+    const closeResult = await order.closePosition(symbol);
+
+    // log close result.
+    functions.logger.info("placeLimit|closeResult", closeResult);
+
     if (proposal.side === "buy") {
       ret = await order.buyLimit(exeOrder);
     } else if (proposal.side === "sell") {
@@ -548,6 +686,41 @@ exports.ProposalManager = class ProposalManager {
       throw new Error("Invalid side");
     }
 
+    functions.logger.info("placeLimit results", ret);
+    if (ret.result.code) {
+      throw new Error(ret.result.msg);
+    }
+
+    return ret;
+  }
+
+  async placeMarket() {
+    const {proposal} = this;
+    const {symbol, exchange, roundedEntry, roundedQty} = proposal;
+    const order = new OrderManager(exchange);
+    let ret;
+    // Place order.
+    const exeOrder = {symbol, qty: roundedQty, price: roundedEntry};
+
+    // Log exeOrder and side.
+    functions.logger.info("placeLimit|exeOrder", exeOrder, proposal.side);
+
+
+    // Close current position if exits.
+    const closeResult = await order.closePosition(symbol);
+
+    // log close result.
+    functions.logger.info("placeLimit|closeResult", closeResult);
+
+    if (proposal.side === "buy") {
+      ret = await order.buyMarket(exeOrder);
+    } else if (proposal.side === "sell") {
+      ret = await order.sellMarket(exeOrder);
+    } else {
+      throw new Error("Invalid side");
+    }
+
+    functions.logger.info("placeLimit results", ret);
     if (ret.result.code) {
       throw new Error(ret.result.msg);
     }
@@ -560,6 +733,7 @@ exports.ProposalManager = class ProposalManager {
     const {exchange} = proposal;
     const order = new OrderManager(exchange);
     const ret = await order.placeStopLoss(proposal);
+    functions.logger.info("placeStopLoss results", ret);
     const results = [ret].flat(5);
     return results;
   }
@@ -569,15 +743,14 @@ exports.ProposalManager = class ProposalManager {
     const {exchange} = proposal;
     const order = new OrderManager(exchange);
     const ret = await order.placeTakeProfit(proposal);
-
+    functions.logger.info("placeTakeProfit results", ret);
     const results = [ret].flat(5);
     return results;
   }
 
-  static getAdjQty(qty,symbolInfo){
-
+  static getAdjQty(qty, symbolInfo) {
     const {filters} = symbolInfo;
-    const {stepSize, filterType, maxQty, minQty} = filters.find(iFilter => iFilter.filterType === "LOT_SIZE");
+    const {stepSize, maxQty, minQty} = filters.find((iFilter) => iFilter.filterType === "LOT_SIZE");
 
     // Round to stepSize
     const bnbInstance = OrderManager.getExchangeInstance();
@@ -594,9 +767,9 @@ exports.ProposalManager = class ProposalManager {
     return amountQty;
   }
 
-  static getAdjPrice(price,symbolInfo){
+  static getAdjPrice(price, symbolInfo) {
     const {filters} = symbolInfo;
-    const {tickSize, maxPrice, minPrice} = filters.find(iFilter => iFilter.filterType === "PRICE_FILTER");
+    const {tickSize, maxPrice, minPrice} = filters.find((iFilter) => iFilter.filterType === "PRICE_FILTER");
 
     // Round to tickSize
     const bnbInstance = OrderManager.getExchangeInstance();
@@ -612,7 +785,6 @@ exports.ProposalManager = class ProposalManager {
 
     return amountPrice;
   }
-
 };
 
 

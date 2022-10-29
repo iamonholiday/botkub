@@ -8,7 +8,7 @@ const os = require("os");
 const {CommonHelper} = require("./common-helper");
 const hostname = os.hostname();
 
-const DEBUG_IGNORE_FULL_FILTER = false;
+const DEBUG_IGNORE_FULL_FILTER = true;
 
 
 const SEPERATOR = "##########";
@@ -56,6 +56,12 @@ exports.SignalHelper = class SignalHelper {
       let [messageType, group, indy, side, ticker, time, interval, entry, mark, sl, leverage,
         tp0, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9,
         expiry, exchange] = row.split("|");
+
+      // If expiry is null then set now + 10 minutes.
+      if (!expiry) {
+        expiry = new Date();
+        expiry.setMinutes(expiry.getMinutes() + 10);
+      }
 
       // common fields
       const symbol = ticker;
@@ -107,6 +113,12 @@ exports.SignalHelper = class SignalHelper {
       // eslint-disable-next-line max-len
       let [messageType, group, indy, side, ticker, time, interval, entry, mark, sl, expiry, exchange] = row.split("|");
 
+      // If expiry is null then set now + 10 minutes.
+      if (!expiry) {
+        expiry = new Date();
+        expiry.setMinutes(expiry.getMinutes() + 10);
+      }
+
       // common fields
       const symbol = ticker;
       const obsoletedFlag = "n";
@@ -141,6 +153,12 @@ exports.SignalHelper = class SignalHelper {
       let [
         messageType, group, indy, side, ticker, time, interval, entry, mark, tp0, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9, expiry, exchange,
       ] = row.split("|");
+
+      // If expiry is null then set now + 10 minutes.
+      if (!expiry) {
+        expiry = new Date();
+        expiry.setMinutes(expiry.getMinutes() + 10);
+      }
 
       // common fields
       const symbol = ticker;
@@ -193,7 +211,7 @@ exports.SignalHelper = class SignalHelper {
     return null;
   }
 
-  static async readPulse(exchange, symbol, interval, group = null) {
+  static async readPulse(exchange, symbol, interval, group = null, entry) {
     const db = getDB();
     const collection = db.collection(PULSE_COLLECTION);
     // Query collection where ticker is equal to ticker and readTime is not exits.
@@ -201,6 +219,8 @@ exports.SignalHelper = class SignalHelper {
         .where("exchange", "==", exchange)
         .where("symbol", "==", symbol)
         .where("interval", "==", interval)
+        .where("group", "==", group)
+        .where("entry", "==", entry)
     ;
 
     if (DEBUG_IGNORE_FULL_FILTER === false) {
@@ -215,9 +235,11 @@ exports.SignalHelper = class SignalHelper {
       query = query.where("group", "==", group);
     }
 
-    const snapshot = await query.get();
+    const snapshot = await query
+        .orderBy("time", "desc")
+        .limit(1)
+        .get();
     const json = snapshot.docs
-        .sort((a, b) => a.data().time - b.data().time)
         .map((doc) => {
           const docData = doc.data();
           const iMapped = CommonHelper.parseFirebaseDateToDateByKey(docData, "expiry", "time", "usedTime" );
@@ -229,12 +251,7 @@ exports.SignalHelper = class SignalHelper {
       return [];
     }
 
-    let ret = json;
-    if (Array.isArray(json)) {
-      ret = _.uniqBy(json, "pulse");
-    }
-
-    return ret;
+    return json[0];
   }
 
   static async readSignal(exchange, symbol, interval, messageType, side) {
@@ -249,7 +266,6 @@ exports.SignalHelper = class SignalHelper {
           .where("interval", "==", interval)
           .where("messageType", "==", messageType)
           .where("side", "==", side)
-
       ;
 
       if (DEBUG_IGNORE_FULL_FILTER === false) {
@@ -259,9 +275,11 @@ exports.SignalHelper = class SignalHelper {
             .where("expiry", ">", new Date());
       }
 
-      const snapshot = await query.get();
+      const snapshot = await query
+          .orderBy("time", "desc")
+          .limit(1)
+          .get();
       json = snapshot.docs
-          .sort((a, b) => a.data().time - b.data().time)
           .map((doc) => {
             const docData = doc.data();
             const iMapped = CommonHelper.parseFirebaseDateToDateByKey(docData, "expiry", "time", "usedTime" );
@@ -274,13 +292,12 @@ exports.SignalHelper = class SignalHelper {
       }
     } catch (error) {
       if (error.message.indexOf("The query requires an index.") > -1) {
-        console.warn("The query requires an index. Please create index on firestore.");
+        functions.logger.warn("The query requires an index. Please create index on firestore.");
       } else {
-        console.log(error);
+        functions.logger.info(error);
       }
     }
 
-    // Return latest signal.
     return json[0];
   }
 
@@ -440,6 +457,7 @@ exports.SignalHelper = class SignalHelper {
       side: _.first(json).side,
       messageType: _.first(json).messageType,
       group: _.first(json).group,
+      entry: _.first(json).entry,
     };
   }
 
@@ -464,10 +482,12 @@ exports.SignalHelper = class SignalHelper {
     return _.first(json);
   }
 
-  static async getProposalBySymbol(symbol, side, entryPrice,exchange="binance") {
-
+  static async getProposalBySymbol(symbol, side, entryPrice, exchange="binance") {
     const db = getDB();
     const collection = db.collection(PROPOSALS_COLLECTION);
+
+    // Log query.
+    functions.logger.info("getProposalBySymbol", symbol, side, entryPrice, exchange);
 
     // Find collection by symbol and update readTime.
     const query = collection
